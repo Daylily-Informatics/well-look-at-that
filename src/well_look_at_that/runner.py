@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from well_look_at_that.accounting import write_accounting_outputs
 from well_look_at_that.collectors.codex import collect_codex
 from well_look_at_that.collectors.github import collect_github
 from well_look_at_that.model import ensure_output_dirs, parse_window, run_id_now, window_label
@@ -50,6 +51,7 @@ def backfill_run(
         repo_roots=repo_roots,
     )
     counts.update(codex["counts"])
+    counts.update(write_accounting_outputs(output_root=output_root, run_id=run_id))
     if skip_github:
         counts["github_skipped"] = 1
     else:
@@ -88,6 +90,7 @@ def report_run(*, output_root: Path, window: str) -> dict[str, Any]:
     run_id = run_id_now()
     since = parse_window(window)
     label = window_label(window)
+    write_accounting_outputs(output_root=output_root, run_id=run_id)
     counts = generate_reports(output_root=output_root, since=since, window_label=label, run_id=run_id)
     validation = validate_outputs(output_root=output_root, run_id=run_id)
     return {"run_id": run_id, "status": validation["status"], "counts": counts, "validation": validation}
@@ -99,6 +102,7 @@ def plot_run(*, output_root: Path, window: str, entitlements: Path | None) -> di
     run_id = run_id_now()
     since = parse_window(window)
     label = window_label(window)
+    write_accounting_outputs(output_root=output_root, run_id=run_id)
     counts = generate_plots(output_root=output_root, since=since, window_label=label, run_id=run_id, entitlements=entitlements)
     validation = validate_outputs(output_root=output_root, run_id=run_id)
     return {"run_id": run_id, "status": validation["status"], "counts": counts, "validation": validation}
@@ -109,6 +113,7 @@ def allocate_value_run(*, output_root: Path, window: str, entitlements: Path) ->
     ensure_output_dirs(output_root)
     run_id = run_id_now()
     since = parse_window(window)
+    write_accounting_outputs(output_root=output_root, run_id=run_id)
     counts = allocate_value(output_root=output_root, entitlements=entitlements, since=since, run_id=run_id)
     validation = validate_outputs(output_root=output_root, run_id=run_id)
     return {"run_id": run_id, "status": validation["status"], "counts": counts, "validation": validation}
