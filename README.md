@@ -48,7 +48,7 @@ If GitHub access is intentionally unavailable, use `--skip-github`. Without `--s
 Use this for normal local use before the package is published to an internal or public package index:
 
 ```console
-python -m pip install "well-look-at-that @ git+https://github.com/Daylily-Informatics/well-look-at-that.git@0.1.2"
+python -m pip install "well-look-at-that @ git+https://github.com/Daylily-Informatics/well-look-at-that.git@0.1.3"
 ```
 
 That installs both command names:
@@ -79,7 +79,7 @@ Expected version for this release:
 ```json
 {
   "app": "well-look-at-that",
-  "version": "0.1.2"
+  "version": "0.1.3"
 }
 ```
 
