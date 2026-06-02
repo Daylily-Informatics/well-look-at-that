@@ -26,6 +26,8 @@ ROLLUP_METRIC_COLUMNS = [
     "observed_event_sum_tokens",
     "max_cumulative_tokens",
     "cumulative_delta_tokens",
+    "unique_last_per_thread_turn_tokens",
+    "unique_last_per_session_turn_tokens",
     "unique_last_per_turn_tokens",
     "deduped_turn_tokens",
     "final_session_total_tokens",
@@ -193,6 +195,9 @@ def _summary_markdown(
     observed_event_sum = sum(safe_int(row.get("total_tokens")) for row in raw_events)
     final_session_total = sum(safe_int(row.get("final_session_total_tokens")) for row in thread_rollups)
     cumulative_delta = sum(safe_int(row.get("cumulative_delta_tokens")) for row in thread_rollups)
+    final_thread_total = sum(safe_int(row.get("final_thread_total_tokens")) for row in thread_rollups)
+    thread_turn_total = sum(safe_int(row.get("unique_last_per_thread_turn_tokens")) for row in thread_rollups)
+    session_turn_total = sum(safe_int(row.get("unique_last_per_session_turn_tokens")) for row in thread_rollups)
     thread_ids = {row.get("thread_id") for row in raw_events if row.get("thread_id")}
     repo_counter = Counter(row.get("github_repo") or "(no github repo)" for row in raw_events)
     lines = [
@@ -202,13 +207,20 @@ def _summary_markdown(
         f"- Window: `{window_label}`",
         "- Raw grain: one `token_count` event",
         "- Accounting grain: session/rollout cumulative segment",
+        "- Primary usage basis: final session cumulative totals and cumulative positive deltas.",
         "- Event-row token sums are diagnostic and likely inflated.",
+        "- Logical-thread max cumulative totals are diagnostic and can undercount resumed or multi-segment threads.",
+        "- Turn estimates are diagnostic, not billing truth.",
         f"- Token events: {len(raw_events):,}",
         f"- Threads with token events: {len(thread_ids):,}",
         f"- Indexed thread records: {len(threads):,}",
         f"- Observed event-row sum tokens (diagnostic): {observed_event_sum:,}",
         f"- Final session total tokens (primary accounting approximation): {final_session_total:,}",
         f"- Cumulative delta tokens (time allocation basis): {cumulative_delta:,}",
+        f"- Final thread max cumulative tokens (diagnostic): {final_thread_total:,}",
+        f"- Unique last per thread/turn tokens (diagnostic): {thread_turn_total:,}",
+        f"- Unique last per session/turn tokens (diagnostic): {session_turn_total:,}",
+        "- Deprecated `unique_last_per_turn_tokens` is a session-turn compatibility alias.",
         "- Tabular data format: TSV",
         "- Raw prompts and raw command text are excluded.",
         "",
@@ -262,14 +274,220 @@ def validate_outputs(*, output_root: Path, run_id: str) -> dict[str, Any]:
     scan = scan_paths(generated)
     events = read_tsv(output_root / "data" / "codex_token_events.tsv")
     raw_events = read_tsv(output_root / "data" / "raw_token_events.tsv")
+    event_accounting = read_tsv(output_root / "data" / "token_event_accounting.tsv")
+    turn_estimates = read_tsv(output_root / "data" / "token_turn_estimates.tsv")
     session_rollups = read_tsv(output_root / "data" / "token_session_rollups.tsv")
+    thread_rollups = read_tsv(output_root / "data" / "token_thread_rollups.tsv")
+    reconciliation = read_tsv(output_root / "data" / "token_accounting_reconciliation.tsv")
+    validation_errors = _accounting_validation_errors(
+        raw_events=raw_events,
+        events=events,
+        event_accounting=event_accounting,
+        turn_estimates=turn_estimates,
+        session_rollups=session_rollups,
+        thread_rollups=thread_rollups,
+        reconciliation=reconciliation,
+    )
+    status = (
+        "SUCCESS"
+        if events
+        and raw_events
+        and session_rollups
+        and not csv_paths
+        and scan["finding_count"] == 0
+        and not validation_errors
+        else "FAIL"
+    )
     return {
         "run_id": run_id,
         "token_event_count": len(events),
         "raw_token_event_count": len(raw_events),
+        "token_event_accounting_count": len(event_accounting),
+        "token_turn_estimate_count": len(turn_estimates),
         "token_session_rollup_count": len(session_rollups),
+        "token_thread_rollup_count": len(thread_rollups),
+        "token_reconciliation_count": len(reconciliation),
         "csv_file_count": len(csv_paths),
         "csv_paths": csv_paths,
         "redaction_scan": scan,
-        "status": "SUCCESS" if events and session_rollups and not csv_paths and scan["finding_count"] == 0 else "FAIL",
+        "validation_error_count": len(validation_errors),
+        "validation_errors": validation_errors,
+        "status": status,
     }
+
+
+def _accounting_validation_errors(
+    *,
+    raw_events: list[dict[str, str]],
+    events: list[dict[str, str]],
+    event_accounting: list[dict[str, str]],
+    turn_estimates: list[dict[str, str]],
+    session_rollups: list[dict[str, str]],
+    thread_rollups: list[dict[str, str]],
+    reconciliation: list[dict[str, str]],
+) -> list[str]:
+    errors: list[str] = []
+    if len(raw_events) != len(events):
+        errors.append("raw_token_events.tsv and codex_token_events.tsv row counts differ")
+    if len(event_accounting) != len(raw_events):
+        errors.append("token_event_accounting.tsv must have one row per raw token event")
+    raw_ids = {row.get("event_id") for row in raw_events if row.get("event_id")}
+    accounting_ids = {row.get("event_id") for row in event_accounting if row.get("event_id")}
+    if raw_ids and raw_ids != accounting_ids:
+        errors.append("token_event_accounting.tsv event ids do not match raw token events")
+
+    included_sessions = [row for row in session_rollups if safe_int(row.get("accounting_included"))]
+    session_final = sum(safe_int(row.get("final_session_total_tokens")) for row in included_sessions)
+    session_delta = sum(safe_int(row.get("cumulative_delta_tokens")) for row in included_sessions)
+    thread_final = sum(safe_int(row.get("final_session_total_tokens")) for row in thread_rollups)
+    thread_delta = sum(safe_int(row.get("cumulative_delta_tokens")) for row in thread_rollups)
+    if session_final != thread_final:
+        errors.append("thread final_session_total_tokens do not reconcile to included sessions")
+    if session_delta != thread_delta:
+        errors.append("thread cumulative_delta_tokens do not reconcile to included sessions")
+
+    for row in session_rollups:
+        if (
+            safe_int(row.get("accounting_included"))
+            and not safe_int(row.get("cumulative_reset_count"))
+            and safe_int(row.get("final_session_total_tokens")) != safe_int(row.get("cumulative_delta_tokens"))
+        ):
+            errors.append(f"monotonic session delta mismatch: {row.get('session_segment_id')}")
+            break
+
+    for row in thread_rollups:
+        if safe_int(row.get("session_segment_count")) > 1 and safe_int(row.get("final_thread_total_tokens")) == safe_int(
+            row.get("final_session_total_tokens")
+        ):
+            errors.append(f"multi-segment thread max duplicates session total: {row.get('thread_id')}")
+            break
+    thread_errors = _thread_rollup_validation_errors(raw_events, session_rollups, thread_rollups)
+    errors.extend(thread_errors)
+
+    for row in reconciliation:
+        if row.get("grain") == "thread" and safe_int(row.get("token_event_count")) and not safe_int(
+            row.get("session_segment_count")
+        ):
+            errors.append(f"thread reconciliation missing session_segment_count: {row.get('group_key')}")
+            break
+
+    for grain in ("day", "week", "month"):
+        grain_rows = [row for row in reconciliation if row.get("grain") == grain]
+        if raw_events and grain_rows and not sum(safe_int(row.get("token_event_count")) for row in grain_rows):
+            errors.append(f"{grain} reconciliation token_event_count is zero")
+        if sum(safe_int(row.get("token_event_count")) for row in grain_rows) != len(raw_events):
+            errors.append(f"{grain} reconciliation token_event_count does not reconcile to raw events")
+        if sum(safe_int(row.get("cumulative_delta_tokens")) for row in grain_rows) != sum(
+            safe_int(row.get("cumulative_delta_tokens")) for row in event_accounting
+        ):
+            errors.append(f"{grain} reconciliation cumulative_delta_tokens does not reconcile")
+
+    required_columns = (
+        "unique_last_per_thread_turn_tokens",
+        "unique_last_per_session_turn_tokens",
+    )
+    for name, rows in (
+        ("token_turn_estimates.tsv", turn_estimates),
+        ("token_thread_rollups.tsv", thread_rollups),
+        ("token_accounting_reconciliation.tsv", reconciliation),
+    ):
+        if rows and not all(column in rows[0] for column in required_columns):
+            errors.append(f"{name} missing explicit unique-last columns")
+    return errors
+
+
+def _thread_rollup_validation_errors(
+    raw_events: list[dict[str, str]],
+    session_rollups: list[dict[str, str]],
+    thread_rollups: list[dict[str, str]],
+) -> list[str]:
+    errors: list[str] = []
+    raw_by_thread: dict[str, list[dict[str, str]]] = {}
+    sessions_by_thread: dict[str, list[dict[str, str]]] = {}
+    for row in raw_events:
+        raw_by_thread.setdefault(row.get("thread_id", ""), []).append(row)
+    for row in session_rollups:
+        sessions_by_thread.setdefault(row.get("thread_id", ""), []).append(row)
+
+    for row in thread_rollups:
+        thread_id = row.get("thread_id", "")
+        raw_rows = raw_by_thread.get(thread_id, [])
+        session_rows = sessions_by_thread.get(thread_id, [])
+        if not raw_rows:
+            continue
+        expected_segments = len({event.get("session_segment_id", "") for event in raw_rows if event.get("session_segment_id")})
+        expected_thread_max = max((safe_int(event.get("cumulative_total_tokens")) for event in raw_rows), default=0)
+        expected_distinct_turns = len({(event.get("thread_id", ""), event.get("turn_id", "")) for event in raw_rows if event.get("turn_id")})
+        expected_missing_turns = sum(1 for event in raw_rows if not event.get("turn_id"))
+        expected_repeated_last = _repeated_usage_count(raw_rows, "last_token_usage_hash")
+        expected_repeated_cumulative = _repeated_usage_count(raw_rows, "total_token_usage_hash")
+        expected_thread_turn = _unique_last_per_thread_turn_tokens(raw_rows)
+        expected_session_turn = _unique_last_per_session_turn_tokens(raw_rows)
+        expected_session_final = sum(
+            safe_int(session.get("final_session_total_tokens"))
+            for session in session_rows
+            if safe_int(session.get("accounting_included"))
+        )
+        expected_delta = sum(
+            safe_int(session.get("cumulative_delta_tokens"))
+            for session in session_rows
+            if safe_int(session.get("accounting_included"))
+        )
+        checks = (
+            ("session_segment_count", expected_segments),
+            ("final_thread_total_tokens", expected_thread_max),
+            ("max_cumulative_tokens", expected_thread_max),
+            ("distinct_turn_count", expected_distinct_turns),
+            ("missing_turn_id_count", expected_missing_turns),
+            ("repeated_last_usage_count", expected_repeated_last),
+            ("repeated_cumulative_count", expected_repeated_cumulative),
+            ("unique_last_per_thread_turn_tokens", expected_thread_turn),
+            ("unique_last_per_session_turn_tokens", expected_session_turn),
+            ("final_session_total_tokens", expected_session_final),
+            ("cumulative_delta_tokens", expected_delta),
+        )
+        for column, expected in checks:
+            if safe_int(row.get(column)) != expected:
+                errors.append(f"thread rollup {column} mismatch for {thread_id}")
+                return errors
+    return errors
+
+
+def _turn_key(row: dict[str, str]) -> str:
+    return row.get("turn_id") or row.get("content_event_hash") or row.get("event_id") or ""
+
+
+def _unique_last_per_thread_turn_tokens(rows: list[dict[str, str]]) -> int:
+    seen: set[tuple[str, str, str]] = set()
+    total = 0
+    for row in sorted(rows, key=lambda item: (item.get("timestamp", ""), safe_int(item.get("line_number")))):
+        last_hash = row.get("last_token_usage_hash") or row.get("event_id", "")
+        key = (row.get("thread_id", ""), _turn_key(row), last_hash)
+        if key in seen:
+            continue
+        seen.add(key)
+        total += safe_int(row.get("total_tokens"))
+    return total
+
+
+def _unique_last_per_session_turn_tokens(rows: list[dict[str, str]]) -> int:
+    seen: set[tuple[str, str, str, str]] = set()
+    total = 0
+    for row in sorted(rows, key=lambda item: (item.get("timestamp", ""), safe_int(item.get("line_number")))):
+        last_hash = row.get("last_token_usage_hash") or row.get("event_id", "")
+        key = (row.get("thread_id", ""), row.get("session_segment_id", ""), _turn_key(row), last_hash)
+        if key in seen:
+            continue
+        seen.add(key)
+        total += safe_int(row.get("total_tokens"))
+    return total
+
+
+def _repeated_usage_count(rows: list[dict[str, str]], column: str) -> int:
+    counts: dict[tuple[str, str], int] = {}
+    for row in rows:
+        value = row.get(column)
+        if value:
+            key = (row.get("thread_id", ""), value)
+            counts[key] = counts.get(key, 0) + 1
+    return sum(max(0, count - 1) for count in counts.values())

@@ -96,8 +96,9 @@ def build_accounting(raw_rows: list[dict[str, str]]) -> dict[str, list[dict[str,
         session_rollups.append(session)
         turn_estimates.extend(turns)
 
-    thread_rollups = _thread_rollups(session_rollups)
-    reconciliation = _reconciliation(session_rollups, thread_rollups, event_accounting)
+    turn_estimates = _annotate_thread_turn_estimates(turn_estimates)
+    thread_rollups = _thread_rollups(raw_rows, session_rollups)
+    reconciliation = _reconciliation(raw_rows, session_rollups, thread_rollups, event_accounting)
     return {
         "event_accounting": event_accounting,
         "turn_estimates": turn_estimates,
@@ -287,11 +288,13 @@ def _rollup_segment(
                 "accounting_included": included,
                 "cumulative_reset": reset,
                 "warning_flags": ";".join(sorted(warning_flags)),
+                "last_token_usage_hash": row.get("last_token_usage_hash", ""),
+                "total_token_usage_hash": row.get("total_token_usage_hash", ""),
                 **deltas,
             }
         )
 
-        turn_key = row.get("turn_id") or row.get("event_id", "")
+        turn_key = row.get("turn_id") or row.get("content_event_hash") or row.get("event_id", "")
         last_hash = row.get("last_token_usage_hash") or row.get("event_id", "")
         group_key = (turn_key, last_hash)
         turn = turn_groups.setdefault(
@@ -309,6 +312,8 @@ def _rollup_segment(
                 "last_event_at": row.get("timestamp", ""),
                 "token_event_count": 0,
                 "observed_event_sum_tokens": 0,
+                "unique_last_per_thread_turn_tokens": 0,
+                "unique_last_per_session_turn_tokens": safe_int(row.get("total_tokens")),
                 "unique_last_per_turn_tokens": safe_int(row.get("total_tokens")),
                 "deduped_turn_tokens": safe_int(row.get("total_tokens")),
                 "repeated_last_usage_count": 0,
@@ -330,7 +335,7 @@ def _rollup_segment(
             safe_int(turn["token_event_count"]) - 1,
         )
 
-    unique_last = sum(safe_int(turn["unique_last_per_turn_tokens"]) for turn in turn_groups.values())
+    unique_last = sum(safe_int(turn["unique_last_per_session_turn_tokens"]) for turn in turn_groups.values())
     session = {
         "session_segment_id": segment_id,
         "thread_id": first.get("thread_id", ""),
@@ -352,6 +357,7 @@ def _rollup_segment(
         "max_cumulative_tokens": max_cumulative,
         "final_session_total_tokens": final_session,
         "cumulative_delta_tokens": cumulative_delta,
+        "unique_last_per_session_turn_tokens": unique_last,
         "unique_last_per_turn_tokens": unique_last,
         "deduped_turn_tokens": unique_last,
         "repeated_last_usage_count": repeated_last,
@@ -371,79 +377,97 @@ def _repeated_hash_count(rows: list[dict[str, str]], column: str) -> int:
     return max(0, len(hashes) - len(set(hashes)))
 
 
-def _thread_rollups(session_rollups: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    grouped: dict[str, dict[str, Any]] = {}
+def _annotate_thread_turn_estimates(turns: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    seen: set[tuple[str, str, str]] = set()
+    output: list[dict[str, Any]] = []
+    for turn in sorted(
+        turns,
+        key=lambda row: (
+            row.get("thread_id", ""),
+            row.get("first_event_at", ""),
+            row.get("session_segment_id", ""),
+            row.get("turn_group_key", ""),
+        ),
+    ):
+        row = dict(turn)
+        key = (
+            str(row.get("thread_id") or ""),
+            str(row.get("turn_id") or row.get("turn_group_key") or ""),
+            str(row.get("turn_group_key") or ""),
+        )
+        if key in seen:
+            row["unique_last_per_thread_turn_tokens"] = 0
+        else:
+            seen.add(key)
+            row["unique_last_per_thread_turn_tokens"] = safe_int(
+                row.get("unique_last_per_session_turn_tokens")
+            )
+        row["unique_last_per_turn_tokens"] = row["unique_last_per_session_turn_tokens"]
+        row["deduped_turn_tokens"] = row["unique_last_per_session_turn_tokens"]
+        output.append(row)
+    return output
+
+
+def _thread_rollups(
+    raw_rows: list[dict[str, str]],
+    session_rollups: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    rows_by_thread: dict[str, list[dict[str, str]]] = defaultdict(list)
+    sessions_by_thread: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in raw_rows:
+        rows_by_thread[str(row.get("thread_id") or "")].append(row)
     for row in session_rollups:
-        thread_id = str(row.get("thread_id") or "")
-        dest = grouped.setdefault(
-            thread_id,
-            {
-                "thread_id": thread_id,
-                "github_repo": row.get("github_repo", ""),
-                "workstream_label": row.get("workstream_label", ""),
-                "outcome_type": row.get("outcome_type", ""),
-                "attribution_confidence": row.get("attribution_confidence", ""),
-                "first_event_at": row.get("first_event_at", ""),
-                "last_event_at": row.get("last_event_at", ""),
-                "token_event_count": 0,
-                "distinct_turn_count": 0,
-                "session_segment_count": 0,
-                "included_session_segment_count": 0,
-                "active_session_segment_count": 0,
-                "archived_session_segment_count": 0,
-                "active_archived_overlap": 0,
-                "observed_event_sum_tokens": 0,
-                "max_cumulative_tokens": 0,
-                "final_session_total_tokens": 0,
-                "final_thread_total_tokens": 0,
-                "cumulative_delta_tokens": 0,
-                "unique_last_per_turn_tokens": 0,
-                "deduped_turn_tokens": 0,
-                "repeated_last_usage_count": 0,
-                "repeated_cumulative_count": 0,
-                "cumulative_reset_count": 0,
-                "missing_turn_id_count": 0,
-                "warning_flags": set(),
-            },
-        )
-        _merge_time(dest, row)
-        dest["session_segment_count"] += 1
-        dest["included_session_segment_count"] += safe_int(row.get("accounting_included"))
-        dest["active_session_segment_count"] += safe_int(row.get("is_active_session"))
-        dest["archived_session_segment_count"] += safe_int(row.get("is_archived_session"))
-        for column in (
-            "token_event_count",
-            "distinct_turn_count",
-            "observed_event_sum_tokens",
-            "final_session_total_tokens",
-            "cumulative_delta_tokens",
-            "unique_last_per_turn_tokens",
-            "deduped_turn_tokens",
-            "repeated_last_usage_count",
-            "repeated_cumulative_count",
-            "cumulative_reset_count",
-            "missing_turn_id_count",
-        ):
-            dest[column] += safe_int(row.get(column))
-        dest["max_cumulative_tokens"] = max(
-            safe_int(dest.get("max_cumulative_tokens")),
-            safe_int(row.get("max_cumulative_tokens")),
-        )
-        if row.get("warning_flags"):
-            dest["warning_flags"].update(str(row["warning_flags"]).split(";"))
+        sessions_by_thread[str(row.get("thread_id") or "")].append(row)
+
     output = []
-    for dest in grouped.values():
-        dest["active_archived_overlap"] = (
-            1
-            if safe_int(dest.get("active_session_segment_count"))
-            and safe_int(dest.get("archived_session_segment_count"))
-            else 0
-        )
-        if dest["active_archived_overlap"]:
-            dest["warning_flags"].add("active_archived_overlap")
-        if safe_int(dest["session_segment_count"]) > 1:
-            dest["warning_flags"].add("multi_segment_thread")
-        dest["final_thread_total_tokens"] = dest["final_session_total_tokens"]
+    for thread_id, rows in rows_by_thread.items():
+        sessions = sessions_by_thread.get(thread_id, [])
+        first = _first_row(rows, sessions)
+        warnings = _warning_flags(rows, sessions)
+        session_count = len({row.get("session_segment_id", "") for row in rows if row.get("session_segment_id")})
+        included_sessions = [row for row in sessions if safe_int(row.get("accounting_included"))]
+        active_count = sum(1 for row in sessions if safe_int(row.get("is_active_session")))
+        archived_count = sum(1 for row in sessions if safe_int(row.get("is_archived_session")))
+        active_archived_overlap = 1 if active_count and archived_count else 0
+        if active_archived_overlap:
+            warnings.add("active_archived_overlap")
+        if session_count > 1:
+            warnings.add("multi_segment_thread")
+        excluded_duplicates = sum(1 for row in sessions if not safe_int(row.get("accounting_included")))
+        max_cumulative = _thread_max_cumulative(rows)
+        session_unique = sum(safe_int(row.get("unique_last_per_session_turn_tokens")) for row in sessions)
+        thread_unique = _unique_last_per_thread_turn_tokens(rows)
+        dest = {
+            "thread_id": thread_id,
+            "github_repo": first.get("github_repo", ""),
+            "workstream_label": first.get("workstream_label", ""),
+            "outcome_type": first.get("outcome_type", ""),
+            "attribution_confidence": first.get("attribution_confidence", ""),
+            "first_event_at": min((row.get("timestamp", "") for row in rows if row.get("timestamp")), default=""),
+            "last_event_at": max((row.get("timestamp", "") for row in rows if row.get("timestamp")), default=""),
+            "token_event_count": len(rows),
+            "distinct_turn_count": _distinct_turn_count(rows),
+            "session_segment_count": session_count,
+            "included_session_segment_count": len(included_sessions),
+            "excluded_duplicate_session_segment_count": excluded_duplicates,
+            "active_session_segment_count": active_count,
+            "archived_session_segment_count": archived_count,
+            "active_archived_overlap": active_archived_overlap,
+            "observed_event_sum_tokens": sum(safe_int(row.get("total_tokens")) for row in rows),
+            "max_cumulative_tokens": max_cumulative,
+            "final_session_total_tokens": sum(safe_int(row.get("final_session_total_tokens")) for row in included_sessions),
+            "final_thread_total_tokens": max_cumulative,
+            "cumulative_delta_tokens": sum(safe_int(row.get("cumulative_delta_tokens")) for row in included_sessions),
+            "unique_last_per_thread_turn_tokens": thread_unique,
+            "unique_last_per_session_turn_tokens": session_unique,
+            "unique_last_per_turn_tokens": session_unique,
+            "deduped_turn_tokens": session_unique,
+            "repeated_last_usage_count": _repeated_usage_count(rows, "last_token_usage_hash"),
+            "repeated_cumulative_count": _repeated_usage_count(rows, "total_token_usage_hash"),
+            "cumulative_reset_count": sum(safe_int(row.get("cumulative_reset_count")) for row in sessions),
+            "missing_turn_id_count": sum(1 for row in rows if not row.get("turn_id")),
+            "warning_flags": ";".join(sorted(warnings)),
+        }
         dest["inflation_factor_current_vs_max_cumulative"] = _factor(
             safe_int(dest["observed_event_sum_tokens"]),
             safe_int(dest["max_cumulative_tokens"]),
@@ -452,75 +476,294 @@ def _thread_rollups(session_rollups: list[dict[str, Any]]) -> list[dict[str, Any
             safe_int(dest["observed_event_sum_tokens"]),
             safe_int(dest["cumulative_delta_tokens"]),
         )
-        dest["warning_flags"] = ";".join(sorted(flag for flag in dest["warning_flags"] if flag))
         output.append(dest)
-    return sorted(output, key=lambda row: (-safe_int(row["final_thread_total_tokens"]), row["thread_id"]))
+    return sorted(output, key=lambda row: (-safe_int(row["final_session_total_tokens"]), row["thread_id"]))
+
+
+def _first_row(rows: list[dict[str, str]], session_rows: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    for row in sorted(rows, key=lambda item: (item.get("timestamp", ""), safe_int(item.get("line_number")))):
+        if row:
+            return row
+    return session_rows[0] if session_rows else {}
+
+
+def _warning_flags(rows: list[dict[str, str]], session_rows: list[dict[str, Any]] | None = None) -> set[str]:
+    warnings: set[str] = set()
+    for row in rows:
+        if not row.get("turn_id"):
+            warnings.add("missing_turn_id")
+        if safe_int(row.get("missing_total_token_usage")):
+            warnings.add("missing_total_token_usage")
+    for row in session_rows or []:
+        if row.get("warning_flags"):
+            warnings.update(str(row["warning_flags"]).split(";"))
+    return {flag for flag in warnings if flag}
+
+
+def _thread_max_cumulative(rows: list[dict[str, str]]) -> int:
+    return max((safe_int(row.get("cumulative_total_tokens")) for row in rows), default=0)
+
+
+def _sum_thread_max_cumulative(rows: list[dict[str, str]]) -> int:
+    grouped: dict[str, list[dict[str, str]]] = defaultdict(list)
+    for row in rows:
+        grouped[row.get("thread_id", "")].append(row)
+    return sum(_thread_max_cumulative(thread_rows) for thread_rows in grouped.values())
+
+
+def _distinct_turn_count(rows: list[dict[str, str]]) -> int:
+    return len({(row.get("thread_id", ""), row.get("turn_id", "")) for row in rows if row.get("turn_id")})
+
+
+def _turn_key(row: dict[str, str]) -> str:
+    return row.get("turn_id") or row.get("content_event_hash") or row.get("event_id") or ""
+
+
+def _unique_last_per_thread_turn_tokens(rows: list[dict[str, str]]) -> int:
+    seen: set[tuple[str, str, str]] = set()
+    total = 0
+    for row in _sort_events(rows):
+        last_hash = row.get("last_token_usage_hash") or row.get("event_id", "")
+        key = (row.get("thread_id", ""), _turn_key(row), last_hash)
+        if key in seen:
+            continue
+        seen.add(key)
+        total += safe_int(row.get("total_tokens"))
+    return total
+
+
+def _unique_last_per_session_turn_tokens(rows: list[dict[str, str]]) -> int:
+    seen: set[tuple[str, str, str, str]] = set()
+    total = 0
+    for row in _sort_events(rows):
+        last_hash = row.get("last_token_usage_hash") or row.get("event_id", "")
+        key = (row.get("thread_id", ""), row.get("session_segment_id", ""), _turn_key(row), last_hash)
+        if key in seen:
+            continue
+        seen.add(key)
+        total += safe_int(row.get("total_tokens"))
+    return total
+
+
+def _repeated_usage_count(rows: list[dict[str, str]], column: str) -> int:
+    counts: dict[tuple[str, str], int] = defaultdict(int)
+    for row in rows:
+        value = row.get(column)
+        if value:
+            counts[(row.get("thread_id", ""), value)] += 1
+    return sum(max(0, count - 1) for count in counts.values())
 
 
 def _reconciliation(
+    raw_rows: list[dict[str, str]],
     session_rollups: list[dict[str, Any]],
     thread_rollups: list[dict[str, Any]],
     event_accounting: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
+    sessions_by_id = {str(row.get("session_segment_id") or ""): row for row in session_rollups}
+    events_by_id = {str(row.get("event_id") or ""): row for row in event_accounting}
+    thread_rollups_by_id = {str(row.get("thread_id") or ""): row for row in thread_rollups}
     rows: list[dict[str, Any]] = []
-    rows.extend(_session_based_reconciliation("thread", thread_rollups, ("thread_id",)))
-    rows.extend(_session_based_reconciliation("repo", session_rollups, ("github_repo",)))
-    rows.extend(_session_based_reconciliation("workstream", session_rollups, ("workstream_label",)))
-    rows.extend(_session_based_reconciliation("outcome", session_rollups, ("outcome_type",)))
+    rows.extend(_rollup_reconciliation("thread", thread_rollups))
+    rows.extend(_raw_reconciliation("repo", raw_rows, sessions_by_id, events_by_id, lambda row: row.get("github_repo") or ""))
     rows.extend(
-        _session_based_reconciliation(
-            "attribution_confidence",
-            session_rollups,
-            ("attribution_confidence",),
+        _raw_reconciliation(
+            "workstream",
+            raw_rows,
+            sessions_by_id,
+            events_by_id,
+            lambda row: row.get("workstream_label") or "",
         )
     )
     rows.extend(
-        _session_based_reconciliation(
+        _raw_reconciliation(
+            "outcome",
+            raw_rows,
+            sessions_by_id,
+            events_by_id,
+            lambda row: row.get("outcome_type") or "",
+        )
+    )
+    rows.extend(
+        _raw_reconciliation(
+            "attribution_confidence",
+            raw_rows,
+            sessions_by_id,
+            events_by_id,
+            lambda row: row.get("attribution_confidence") or "",
+        )
+    )
+    rows.extend(
+        _raw_reconciliation(
             "repo_workstream_outcome",
-            session_rollups,
-            ("github_repo", "workstream_label", "outcome_type", "attribution_confidence"),
+            raw_rows,
+            sessions_by_id,
+            events_by_id,
+            lambda row: "|".join(
+                [
+                    row.get("github_repo") or "",
+                    row.get("workstream_label") or "",
+                    row.get("outcome_type") or "",
+                    row.get("attribution_confidence") or "",
+                ]
+            ),
         )
     )
     for grain in ("day", "week", "month"):
-        rows.extend(_time_reconciliation(grain, event_accounting))
+        rows.extend(_time_reconciliation(grain, raw_rows, sessions_by_id, events_by_id, thread_rollups_by_id))
     return rows
 
 
-def _session_based_reconciliation(
+def _rollup_reconciliation(grain: str, source_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    rows = []
+    for source in source_rows:
+        dest = _empty_reconciliation(grain, str(source.get("thread_id") or source.get("group_key") or ""))
+        for column in (
+            "thread_id",
+            "github_repo",
+            "workstream_label",
+            "outcome_type",
+            "attribution_confidence",
+            "token_event_count",
+            "distinct_turn_count",
+            "session_segment_count",
+            "observed_event_sum_tokens",
+            "max_cumulative_tokens",
+            "cumulative_delta_tokens",
+            "unique_last_per_thread_turn_tokens",
+            "unique_last_per_session_turn_tokens",
+            "unique_last_per_turn_tokens",
+            "deduped_turn_tokens",
+            "final_session_total_tokens",
+            "final_thread_total_tokens",
+            "repeated_last_usage_count",
+            "repeated_cumulative_count",
+            "cumulative_reset_count",
+            "missing_turn_id_count",
+            "warning_flags",
+        ):
+            dest[column] = source.get(column, dest.get(column, ""))
+        dest["thread_count"] = 1 if source.get("thread_id") else 0
+        dest["session_segment_count_metric"] = dest["session_segment_count"]
+        _merge_time(dest, source)
+        _set_factors(dest)
+        rows.append(dest)
+    return sorted(rows, key=lambda row: (row["grain"], row["group_key"]))
+
+
+def _raw_reconciliation(
     grain: str,
-    source_rows: list[dict[str, Any]],
-    key_columns: tuple[str, ...],
+    raw_rows: list[dict[str, str]],
+    sessions_by_id: dict[str, dict[str, Any]],
+    events_by_id: dict[str, dict[str, Any]],
+    key_fn,
 ) -> list[dict[str, Any]]:
-    grouped: dict[tuple[str, ...], dict[str, Any]] = {}
-    for row in source_rows:
-        key = tuple(str(row.get(column) or "") for column in key_columns)
-        dest = grouped.setdefault(key, _empty_reconciliation(grain, "|".join(key)))
-        for column in ("thread_id", "github_repo", "workstream_label", "outcome_type", "attribution_confidence"):
-            if not dest[column] and row.get(column):
-                dest[column] = row.get(column)
-        _merge_time(dest, row)
-        _add_metric(dest, row)
-        dest.setdefault("_threads", set()).add(row.get("thread_id", ""))
-        dest.setdefault("_segments", set()).add(row.get("session_segment_id", ""))
-    return _finalize_reconciliation(grouped.values())
+    grouped: dict[str, list[dict[str, str]]] = defaultdict(list)
+    for row in raw_rows:
+        grouped[str(key_fn(row) or "")].append(row)
+    return [
+        _group_reconciliation(
+            grain,
+            group_key,
+            rows,
+            sessions_by_id,
+            events_by_id,
+            include_session_final=True,
+        )
+        for group_key, rows in sorted(grouped.items())
+    ]
 
 
-def _time_reconciliation(grain: str, event_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    grouped: dict[str, dict[str, Any]] = {}
-    for row in event_rows:
+def _time_reconciliation(
+    grain: str,
+    raw_rows: list[dict[str, str]],
+    sessions_by_id: dict[str, dict[str, Any]],
+    events_by_id: dict[str, dict[str, Any]],
+    thread_rollups_by_id: dict[str, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    grouped: dict[str, list[dict[str, str]]] = defaultdict(list)
+    periods: dict[str, tuple[str, str]] = {}
+    for row in raw_rows:
         ts = parse_time(row.get("timestamp"))
         if ts is None:
             continue
         start, end = _period(grain, ts)
-        key = start
-        dest = grouped.setdefault(key, _empty_reconciliation(grain, key))
-        dest["period_start"] = start
-        dest["period_end"] = end
-        _merge_time(dest, row)
-        _add_metric(dest, row)
-        dest.setdefault("_threads", set()).add(row.get("thread_id", ""))
-        dest.setdefault("_segments", set()).add(row.get("session_segment_id", ""))
-    return _finalize_reconciliation(grouped.values())
+        grouped[start].append(row)
+        periods[start] = (start, end)
+    output = []
+    for group_key, rows in sorted(grouped.items()):
+        dest = _group_reconciliation(
+            grain,
+            group_key,
+            rows,
+            sessions_by_id,
+            events_by_id,
+            include_session_final=False,
+        )
+        dest["period_start"], dest["period_end"] = periods[group_key]
+        thread_ids = {row.get("thread_id", "") for row in rows if row.get("thread_id")}
+        dest["final_thread_total_tokens"] = sum(
+            safe_int(thread_rollups_by_id.get(thread_id, {}).get("final_thread_total_tokens"))
+            for thread_id in thread_ids
+        )
+        output.append(dest)
+    return output
+
+
+def _group_reconciliation(
+    grain: str,
+    group_key: str,
+    rows: list[dict[str, str]],
+    sessions_by_id: dict[str, dict[str, Any]],
+    events_by_id: dict[str, dict[str, Any]],
+    *,
+    include_session_final: bool,
+) -> dict[str, Any]:
+    dest = _empty_reconciliation(grain, group_key)
+    first = _first_row(rows)
+    for column in ("thread_id", "github_repo", "workstream_label", "outcome_type", "attribution_confidence"):
+        dest[column] = first.get(column, "")
+    _merge_time(dest, {"first_event_at": min((row.get("timestamp", "") for row in rows if row.get("timestamp")), default="")})
+    _merge_time(dest, {"last_event_at": max((row.get("timestamp", "") for row in rows if row.get("timestamp")), default="")})
+    threads = {row.get("thread_id", "") for row in rows if row.get("thread_id")}
+    segments = {row.get("session_segment_id", "") for row in rows if row.get("session_segment_id")}
+    included_segments = [
+        segment_id
+        for segment_id in segments
+        if safe_int(sessions_by_id.get(segment_id, {}).get("accounting_included"))
+    ]
+    event_rows = [events_by_id.get(str(row.get("event_id") or ""), {}) for row in rows]
+    session_rows = [sessions_by_id.get(segment_id, {}) for segment_id in segments]
+    warnings = _warning_flags(rows, session_rows)
+    dest.update(
+        {
+            "token_event_count": len(rows),
+            "thread_count": len(threads),
+            "session_segment_count": len(segments),
+            "distinct_turn_count": _distinct_turn_count(rows),
+            "observed_event_sum_tokens": sum(safe_int(row.get("total_tokens")) for row in rows),
+            "max_cumulative_tokens": _sum_thread_max_cumulative(rows),
+            "cumulative_delta_tokens": sum(safe_int(row.get("cumulative_delta_tokens")) for row in event_rows),
+            "unique_last_per_thread_turn_tokens": _unique_last_per_thread_turn_tokens(rows),
+            "unique_last_per_session_turn_tokens": _unique_last_per_session_turn_tokens(rows),
+            "repeated_last_usage_count": _repeated_usage_count(rows, "last_token_usage_hash"),
+            "repeated_cumulative_count": _repeated_usage_count(rows, "total_token_usage_hash"),
+            "cumulative_reset_count": sum(safe_int(row.get("cumulative_reset")) for row in event_rows),
+            "missing_turn_id_count": sum(1 for row in rows if not row.get("turn_id")),
+            "warning_flags": ";".join(sorted(warnings)),
+        }
+    )
+    if include_session_final:
+        dest["final_session_total_tokens"] = sum(
+            safe_int(sessions_by_id.get(segment_id, {}).get("final_session_total_tokens"))
+            for segment_id in included_segments
+        )
+    dest["final_thread_total_tokens"] = dest["max_cumulative_tokens"]
+    dest["unique_last_per_turn_tokens"] = dest["unique_last_per_session_turn_tokens"]
+    dest["deduped_turn_tokens"] = dest["unique_last_per_session_turn_tokens"]
+    dest["session_segment_count_metric"] = dest["session_segment_count"]
+    _set_factors(dest)
+    return dest
 
 
 def _empty_reconciliation(grain: str, group_key: str) -> dict[str, Any]:
@@ -541,6 +784,8 @@ def _empty_reconciliation(grain: str, group_key: str) -> dict[str, Any]:
         "observed_event_sum_tokens": 0,
         "max_cumulative_tokens": 0,
         "cumulative_delta_tokens": 0,
+        "unique_last_per_thread_turn_tokens": 0,
+        "unique_last_per_session_turn_tokens": 0,
         "unique_last_per_turn_tokens": 0,
         "deduped_turn_tokens": 0,
         "final_session_total_tokens": 0,
@@ -556,46 +801,15 @@ def _empty_reconciliation(grain: str, group_key: str) -> dict[str, Any]:
     }
 
 
-def _add_metric(dest: dict[str, Any], row: dict[str, Any]) -> None:
-    for column in (
-        "token_event_count",
-        "distinct_turn_count",
-        "observed_event_sum_tokens",
-        "cumulative_delta_tokens",
-        "unique_last_per_turn_tokens",
-        "deduped_turn_tokens",
-        "final_session_total_tokens",
-        "final_thread_total_tokens",
-        "repeated_last_usage_count",
-        "repeated_cumulative_count",
-        "cumulative_reset_count",
-        "missing_turn_id_count",
-    ):
-        dest[column] += safe_int(row.get(column))
-    dest["max_cumulative_tokens"] += safe_int(row.get("max_cumulative_tokens"))
-    if row.get("warning_flags"):
-        dest["warning_flags"].update(str(row["warning_flags"]).split(";"))
-
-
-def _finalize_reconciliation(rows) -> list[dict[str, Any]]:
-    output = []
-    for row in rows:
-        threads = {item for item in row.pop("_threads", set()) if item}
-        segments = {item for item in row.pop("_segments", set()) if item}
-        row["thread_count"] = len(threads)
-        row["session_segment_count"] = len(segments)
-        row["session_segment_count_metric"] = len(segments)
-        row["inflation_factor_current_vs_max_cumulative"] = _factor(
-            safe_int(row["observed_event_sum_tokens"]),
-            safe_int(row["max_cumulative_tokens"]),
-        )
-        row["inflation_factor_current_vs_delta"] = _factor(
-            safe_int(row["observed_event_sum_tokens"]),
-            safe_int(row["cumulative_delta_tokens"]),
-        )
-        row["warning_flags"] = ";".join(sorted(flag for flag in row["warning_flags"] if flag))
-        output.append(row)
-    return sorted(output, key=lambda item: (item["grain"], item["group_key"]))
+def _set_factors(row: dict[str, Any]) -> None:
+    row["inflation_factor_current_vs_max_cumulative"] = _factor(
+        safe_int(row.get("observed_event_sum_tokens")),
+        safe_int(row.get("max_cumulative_tokens")),
+    )
+    row["inflation_factor_current_vs_delta"] = _factor(
+        safe_int(row.get("observed_event_sum_tokens")),
+        safe_int(row.get("cumulative_delta_tokens")),
+    )
 
 
 def _merge_time(dest: dict[str, Any], row: dict[str, Any]) -> None:
