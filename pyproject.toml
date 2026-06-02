@@ -1,0 +1,47 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "well-look-at-that"
+version = "0.1.0"
+description = "Codex token usage to GitHub outcome reporting."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "cli-core-yo==2.1.1",
+    "rich>=13.0.0",
+    "typer>=0.12.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "build>=1.2.0",
+    "pytest>=8.0",
+]
+
+[project.scripts]
+well-look-at-that = "well_look_at_that.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["well_look_at_that*"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "B", "C4", "UP"]
+ignore = ["E501", "B904"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = [
+    "-v",
+    "--tb=short",
+]
