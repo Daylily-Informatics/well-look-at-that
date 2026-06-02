@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from well_look_at_that.accounting import accounting_snapshot
 from well_look_at_that.model import VALUE_ALLOCATION_COLUMNS, parse_time, safe_int
 from well_look_at_that.tsv import read_tsv, write_tsv
 
@@ -24,11 +25,7 @@ def allocate_value(*, output_root: Path, entitlements: Path, since, run_id: str)
     entitlement_rows = read_tsv(entitlements)
     if not entitlement_rows:
         raise RuntimeError(f"Entitlement TSV is empty: {entitlements}")
-    events = [
-        row
-        for row in read_tsv(output_root / "data" / "codex_token_events.tsv")
-        if (parse_time(row.get("timestamp")) or since) >= since
-    ]
+    events = accounting_snapshot(output_root, since)["event_accounting"]
     allocations: list[dict[str, Any]] = []
     counters: dict[int, int] = {}
 
@@ -43,7 +40,7 @@ def allocate_value(*, output_root: Path, entitlements: Path, since, run_id: str)
             if start and end and start <= ts < end:
                 window_index = idx
                 break
-        tokens = safe_int(event.get("total_tokens"))
+        tokens = safe_int(event.get("cumulative_delta_tokens"))
         if window_index is None:
             allocations.append(_allocation(event, tokens, "unpriced", 0.0, "", "missing_entitlement", "", run_id))
             continue
@@ -103,8 +100,10 @@ def _allocation(
 ) -> dict[str, Any]:
     return {
         "event_id": event.get("event_id", ""),
+        "session_segment_id": event.get("session_segment_id", ""),
         "thread_id": event.get("thread_id", ""),
         "timestamp": event.get("timestamp", ""),
+        "accounting_basis": "cumulative_delta_tokens",
         "total_tokens": tokens,
         "funding_source": funding_source,
         "allocated_tokens": tokens,

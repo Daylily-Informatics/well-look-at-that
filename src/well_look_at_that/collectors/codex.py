@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from well_look_at_that.model import (
+    RAW_TOKEN_EVENT_COLUMNS,
     THREAD_COLUMNS,
     TOKEN_EVENT_COLUMNS,
     infer_outcome_type,
@@ -44,6 +45,25 @@ def _infer_thread_id_from_path(path: Path) -> str:
         if len(candidate) == 36 and candidate.count("-") == 4:
             return candidate
     return ""
+
+
+def _json_hash(value: Any) -> str:
+    if value in (None, ""):
+        return ""
+    text = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return sha1_text(text)
+
+
+def _is_under(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return False
+    return True
+
+
+def _session_segment_id(thread_id: str, path: Path) -> str:
+    return sha1_text(f"{thread_id}\t{path}")
 
 
 def _git_value(cwd: str | Path, args: list[str]) -> str:
@@ -332,14 +352,29 @@ def collect_codex(
                 secondary = rate_limits.get("secondary") or {}
                 credits = rate_limits.get("credits")
                 credits = credits if isinstance(credits, dict) else {}
+                raw_event_id = str(
+                    record.get("id")
+                    or record.get("event_id")
+                    or record.get("eventId")
+                    or payload.get("id")
+                    or payload.get("event_id")
+                    or payload.get("eventId")
+                    or ""
+                )
                 event_id = sha1_text(f"{path}:{line_number}:{record.get('timestamp')}:{thread_id}")
+                segment_id = _session_segment_id(thread_id, path)
+                is_active = 1 if _is_under(path, codex_home / "sessions") else 0
+                is_archived = 1 if _is_under(path, codex_home / "archived_sessions") else 0
                 event = {
                     "event_id": event_id,
+                    "raw_event_id": raw_event_id,
                     "thread_id": thread_id,
                     "turn_id": current_turn_id,
                     "timestamp": isoformat(ts),
+                    "source_path": str(path),
                     "rollout_path": str(path),
                     "line_number": line_number,
+                    "session_segment_id": segment_id,
                     "input_tokens": safe_int(last.get("input_tokens")),
                     "cached_input_tokens": safe_int(last.get("cached_input_tokens")),
                     "output_tokens": safe_int(last.get("output_tokens")),
@@ -352,6 +387,23 @@ def collect_codex(
                         cumulative.get("reasoning_output_tokens")
                     ),
                     "cumulative_total_tokens": safe_int(cumulative.get("total_tokens")),
+                    "last_token_usage_hash": _json_hash(last) if last else "",
+                    "total_token_usage_hash": _json_hash(cumulative) if cumulative else "",
+                    "token_count_payload_hash": _json_hash(payload),
+                    "content_event_hash": _json_hash(
+                        {
+                            "thread_id": thread_id,
+                            "turn_id": current_turn_id,
+                            "last_token_usage": last,
+                            "total_token_usage": cumulative,
+                        }
+                    ),
+                    "is_active_session": is_active,
+                    "is_archived_session": is_archived,
+                    "missing_last_token_usage": 0 if last else 1,
+                    "missing_total_token_usage": 0 if cumulative else 1,
+                    "accounting_included": 1,
+                    "duplicate_segment_of": "",
                     "model_context_window": safe_int(info.get("model_context_window")),
                     "primary_used_percent": safe_float(primary.get("used_percent")),
                     "primary_window_minutes": safe_int(primary.get("window_minutes")),
@@ -391,7 +443,9 @@ def collect_codex(
 
     thread_rows = list(threads.values())
     write_tsv(output_root / "data" / "codex_threads.tsv", thread_rows, THREAD_COLUMNS)
+    write_tsv(output_root / "data" / "raw_token_events.tsv", events, RAW_TOKEN_EVENT_COLUMNS)
     write_tsv(output_root / "data" / "codex_token_events.tsv", events, TOKEN_EVENT_COLUMNS)
     counts["threads_written"] = len(thread_rows)
+    counts["raw_token_events_written"] = len(events)
     counts["token_events_written"] = len(events)
     return {"counts": dict(counts), "threads": thread_rows, "events": events}

@@ -196,5 +196,9 @@ def test_backfill_run_creates_reports_plots_and_ledger(tmp_path: Path) -> None:
     assert result["status"] == "SUCCESS"
     assert Path(result["ledger_path"]).exists()
     assert read_tsv(output_root / "data" / "codex_token_events.tsv")[0]["total_tokens"] == "4"
+    assert read_tsv(output_root / "data" / "raw_token_events.tsv")[0]["session_segment_id"]
+    assert read_tsv(output_root / "data" / "token_session_rollups.tsv")[0]["final_session_total_tokens"] == "4"
+    assert (output_root / "data" / "token_accounting_reconciliation.tsv").exists()
     assert (output_root / "reports" / "latest_2026-01-01T00:00:00Z_summary.md").exists()
+    assert (output_root / "reports" / "latest_2026-01-01T00:00:00Z_daily_token_accounting.tsv").exists()
     assert (output_root / "plots" / "latest_2026-01-01T00:00:00Z_token_event_raster.html").exists()

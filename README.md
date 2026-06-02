@@ -1,6 +1,6 @@
 # well-look-at-that
 
-`well-look-at-that` is a local reporting CLI for joining Codex token usage to GitHub activity and outcome-oriented workstreams. It preserves Codex usage at the smallest reliable local grain: one row per captured `token_count` event.
+`well-look-at-that` is a local reporting CLI for joining Codex token usage to GitHub activity and outcome-oriented workstreams. It preserves Codex usage at the smallest raw local grain: one row per captured `token_count` event.
 
 The durable tabular format is TSV. The tool does not write CSV files.
 
@@ -26,6 +26,24 @@ Primary GitHub inputs:
 
 Raw prompts, raw command text, credentials, tokens, and PHI are not stored in generated outputs. Reports use counts, rollups, evidence file paths, line numbers, and redacted snippets where needed.
 
+## Token Accounting Basis
+
+Raw `token_count` events are diagnostic evidence, not validated accounting totals. Codex can emit repeated `last_token_usage` or repeated cumulative usage records within a thread, so summing raw event rows can overstate usage.
+
+`wlat` keeps raw rows but derives separate accounting views:
+
+- Raw grain: one `token_count` event in `data/raw_token_events.tsv`.
+- Accounting grain: one session/rollout cumulative segment in `data/token_session_rollups.tsv`.
+- Time allocation grain: positive cumulative deltas in `data/token_event_accounting.tsv`.
+- Thread grain: rollup across included session segments in `data/token_thread_rollups.tsv`.
+
+Report language is explicit:
+
+- `observed_event_sum_tokens` is the old raw event-row sum and is diagnostic.
+- `final_session_total_tokens` is the primary quota approximation.
+- `cumulative_delta_tokens` is the basis for day/week/month allocation and burnup plots.
+- `deduped_turn_tokens` is a diagnostic turn estimate, not a billing total.
+
 ## Requirements
 
 - Python `>=3.12`
@@ -48,7 +66,7 @@ If GitHub access is intentionally unavailable, use `--skip-github`. Without `--s
 Use this for normal local use before the package is published to an internal or public package index:
 
 ```console
-python -m pip install "well-look-at-that @ git+https://github.com/Daylily-Informatics/well-look-at-that.git@0.1.3"
+python -m pip install "well-look-at-that @ git+https://github.com/Daylily-Informatics/well-look-at-that.git@0.1.4"
 ```
 
 That installs both command names:
@@ -79,7 +97,7 @@ Expected version for this release:
 ```json
 {
   "app": "well-look-at-that",
-  "version": "0.1.3"
+  "version": "0.1.4"
 }
 ```
 
@@ -166,11 +184,20 @@ Each run writes timestamped artifacts under the output root. Common paths:
 
 ```text
 data/codex_token_events.tsv
+data/raw_token_events.tsv
+data/token_event_accounting.tsv
+data/token_turn_estimates.tsv
+data/token_session_rollups.tsv
+data/token_thread_rollups.tsv
+data/token_accounting_reconciliation.tsv
 data/codex_threads.tsv
 data/github_events.tsv
 reports/latest_<window>_summary.md
 reports/latest_<window>_thread_rollups.tsv
 reports/latest_<window>_repo_workstream_outcome_rollups.tsv
+reports/latest_<window>_daily_token_accounting.tsv
+reports/latest_<window>_weekly_token_accounting.tsv
+reports/latest_<window>_monthly_token_accounting.tsv
 reports/latest_<window>_attribution_confidence_summary.tsv
 plots/latest_<window>_token_event_raster.html
 plots/latest_<window>_token_mix_stacked_area.html
@@ -180,7 +207,7 @@ plots/latest_<window>_top_threads_sparklines.html
 runs/<run_id>_execution_ledger.md
 ```
 
-The event-grain TSV is the source table for higher-level reports. Thread, repo, workstream, outcome, hour, and day views aggregate upward from token events.
+The raw event-grain TSV is the source evidence table. Thread, repo, workstream, outcome, day, week, and month reports aggregate upward from derived accounting views.
 
 ## Token Value And Entitlements
 
@@ -213,7 +240,7 @@ wlat plot \
   --entitlements ~/.codex/docs/codex-github-outcomes/config/token_entitlements.tsv
 ```
 
-When entitlement rows are present, the burnup plot can overlay base subscription allocation and purchased-token allocation. Observed purchased-credit balances from Codex token events are reported separately unless a valid conversion is explicitly supplied in data that the tool understands.
+When entitlement rows are present, the burnup plot can overlay base subscription allocation and purchased-token allocation. Usage in that plot is cumulative-delta accounting, not raw event-row summation. Observed purchased-credit balances from Codex token events are reported separately unless a valid conversion is explicitly supplied in data that the tool understands.
 
 ## Attribution Guidelines For Future Work
 

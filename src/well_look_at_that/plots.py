@@ -6,12 +6,17 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
+from well_look_at_that.accounting import (
+    accounting_snapshot,
+    load_raw_token_events,
+    write_accounting_outputs,
+)
 from well_look_at_that.model import parse_time, safe_int
 from well_look_at_that.tsv import read_tsv
 
 
-def _events(output_root: Path, since) -> list[dict[str, str]]:
-    rows = read_tsv(output_root / "data" / "codex_token_events.tsv")
+def _raw_events(output_root: Path, since) -> list[dict[str, str]]:
+    rows = load_raw_token_events(output_root)
     return [row for row in rows if (parse_time(row.get("timestamp")) or since) >= since]
 
 
@@ -40,20 +45,23 @@ svg {{ max-width: 100%; height: auto; border: 1px solid #d9e2ec; background: #ff
 
 def generate_plots(*, output_root: Path, since, window_label: str, run_id: str, entitlements: Path | None = None) -> dict[str, Any]:
     output_root = output_root.expanduser()
-    events = _events(output_root, since)
+    if not (output_root / "data" / "token_session_rollups.tsv").exists():
+        write_accounting_outputs(output_root=output_root, run_id=run_id)
+    raw_events = _raw_events(output_root, since)
+    accounting_events = accounting_snapshot(output_root, since)["event_accounting"]
     plot_root = output_root / "plots"
     plot_root.mkdir(parents=True, exist_ok=True)
     artifacts = {
-        "token_event_raster": _write_pair(plot_root, run_id, window_label, "token_event_raster", _token_event_raster(events)),
-        "token_mix_stacked_area": _write_pair(plot_root, run_id, window_label, "token_mix_stacked_area", _token_mix(events)),
-        "repo_outcome_heatmap": _write_pair(plot_root, run_id, window_label, "repo_outcome_heatmap", _heatmap(events)),
-        "top_threads_sparklines": _write_pair(plot_root, run_id, window_label, "top_threads_sparklines", _sparklines(events)),
+        "token_event_raster": _write_pair(plot_root, run_id, window_label, "token_event_raster", _token_event_raster(raw_events)),
+        "token_mix_stacked_area": _write_pair(plot_root, run_id, window_label, "token_mix_stacked_area", _token_mix(accounting_events)),
+        "repo_outcome_heatmap": _write_pair(plot_root, run_id, window_label, "repo_outcome_heatmap", _heatmap(accounting_events)),
+        "top_threads_sparklines": _write_pair(plot_root, run_id, window_label, "top_threads_sparklines", _sparklines(accounting_events)),
         "cumulative_burnup_entitlements": _write_pair(
             plot_root,
             run_id,
             window_label,
             "cumulative_burnup_entitlements",
-            _burnup(events, entitlements),
+            _burnup(accounting_events, entitlements),
         ),
     }
     return {"plot_count": len(artifacts), "plots": artifacts}
@@ -114,7 +122,7 @@ def _token_event_raster(events: list[dict[str, str]]) -> str:
     svg = f'<svg viewBox="0 0 {width} {height}" role="img">{"".join(labels)}{"".join(rects)}</svg>'
     return _html_doc(
         "Token Event Raster",
-        f"<h1>Token Event Raster</h1><p class=\"note\">One mark per token_count event. Color is log-scaled total tokens.</p>{svg}",
+        f"<h1>Token Event Raster</h1><p class=\"note\">Diagnostic raw event view. One mark per token_count event. Color is log-scaled observed event-sum tokens, not validated accounting total.</p>{svg}",
     )
 
 
@@ -131,18 +139,18 @@ def _token_mix(events: list[dict[str, str]]) -> str:
         key = _hour_key(row.get("timestamp", ""))
         if not key:
             continue
-        for col in ("input_tokens", "cached_input_tokens", "output_tokens", "reasoning_output_tokens"):
+        for col in ("delta_input_tokens", "delta_cached_input_tokens", "delta_output_tokens", "delta_reasoning_output_tokens"):
             buckets[key][col] += safe_int(row.get(col))
     keys = sorted(buckets)
     width = 1400
     height = 460
-    max_total = max((sum(buckets[key].values()) for key in keys), default=1)
+    max_total = max(1, max((sum(buckets[key].values()) for key in keys), default=0))
     bar_w = max(1, (width - 120) / max(1, len(keys)))
     colors = {
-        "input_tokens": "#2f80ed",
-        "cached_input_tokens": "#27ae60",
-        "output_tokens": "#f2994a",
-        "reasoning_output_tokens": "#9b51e0",
+        "delta_input_tokens": "#2f80ed",
+        "delta_cached_input_tokens": "#27ae60",
+        "delta_output_tokens": "#f2994a",
+        "delta_reasoning_output_tokens": "#9b51e0",
     }
     bars = []
     for idx, key in enumerate(keys):
@@ -155,7 +163,7 @@ def _token_mix(events: list[dict[str, str]]) -> str:
             bars.append(f'<rect x="{x:.1f}" y="{y_base:.1f}" width="{max(1, bar_w - 1):.1f}" height="{h:.1f}" fill="{colors[col]}"><title>{html.escape(key)} {col}: {value}</title></rect>')
     legend = " ".join(f'<span style="color:{color}">{html.escape(col)}</span>' for col, color in colors.items())
     svg = f'<svg viewBox="0 0 {width} {height}" role="img"><line class="grid" x1="70" y1="{height-60}" x2="{width-30}" y2="{height-60}"/>{"".join(bars)}</svg>'
-    return _html_doc("Token Mix Stacked Area", f"<h1>Token Mix Stacked Area</h1><p class=\"note\">Hourly stacked token mix. {legend}</p>{svg}")
+    return _html_doc("Token Mix Stacked Area", f"<h1>Token Mix Stacked Area</h1><p class=\"note\">Hourly cumulative-delta token mix. {legend}</p>{svg}")
 
 
 def _heatmap(events: list[dict[str, str]]) -> str:
@@ -163,10 +171,10 @@ def _heatmap(events: list[dict[str, str]]) -> str:
     days = sorted({(row.get("timestamp") or "")[:10] for row in events if row.get("timestamp")})
     totals: dict[tuple[str, str], int] = defaultdict(int)
     for row in events:
-        totals[(row.get("github_repo") or "(no github repo)", (row.get("timestamp") or "")[:10])] += safe_int(row.get("total_tokens"))
+        totals[(row.get("github_repo") or "(no github repo)", (row.get("timestamp") or "")[:10])] += safe_int(row.get("cumulative_delta_tokens"))
     width = max(700, 160 + 44 * max(1, len(days)))
     height = max(180, 56 + 24 * max(1, len(repos)))
-    max_tokens = max(totals.values(), default=1)
+    max_tokens = max(1, max(totals.values(), default=0))
     cells = []
     for y_idx, repo in enumerate(repos):
         cells.append(f'<text class="label" x="8" y="{68 + y_idx * 24}">{html.escape(repo[:28])}</text>')
@@ -177,30 +185,31 @@ def _heatmap(events: list[dict[str, str]]) -> str:
     for x_idx, day in enumerate(days):
         cells.append(f'<text class="axis" x="{150 + x_idx * 44}" y="42" transform="rotate(-35 {150 + x_idx * 44},42)">{html.escape(day)}</text>')
     svg = f'<svg viewBox="0 0 {width} {height}" role="img">{"".join(cells)}</svg>'
-    return _html_doc("Repo Outcome Heatmap", f"<h1>Repo Outcome Heatmap</h1><p class=\"note\">Repo by day token intensity. Empty GitHub attribution is shown as no github repo.</p>{svg}")
+    return _html_doc("Repo Outcome Heatmap", f"<h1>Repo Outcome Heatmap</h1><p class=\"note\">Repo by day cumulative-delta token intensity. Empty GitHub attribution is shown as no github repo.</p>{svg}")
 
 
 def _sparklines(events: list[dict[str, str]]) -> str:
     by_thread: dict[str, list[dict[str, str]]] = defaultdict(list)
     for row in events:
         by_thread[row.get("thread_id") or "unknown"].append(row)
-    ranked = sorted(by_thread.items(), key=lambda item: -sum(safe_int(row.get("total_tokens")) for row in item[1]))[:40]
+    ranked = sorted(by_thread.items(), key=lambda item: -sum(safe_int(row.get("cumulative_delta_tokens")) for row in item[1]))[:40]
     width = 1400
     height = max(140, 34 * max(1, len(ranked)) + 40)
     start, end = _time_extent(events)
     marks = []
     for idx, (thread_id, rows) in enumerate(ranked):
         y = 34 + idx * 30
-        total = sum(safe_int(row.get("total_tokens")) for row in rows)
+        total = sum(safe_int(row.get("cumulative_delta_tokens")) for row in rows)
         label = f"{thread_id[:8]} {total:,}"
         marks.append(f'<text class="label" x="8" y="{y + 10}">{html.escape(label)}</text>')
         marks.append(f'<line class="grid" x1="170" y1="{y+5}" x2="{width-30}" y2="{y+5}"/>')
         for row in rows:
             x = _x(parse_time(row.get("timestamp")), start, end, width - 220) + 190
-            h = 4 + min(20, math.log10(safe_int(row.get("total_tokens")) + 1) * 4)
-            marks.append(f'<rect x="{x:.1f}" y="{y + 5 - h:.1f}" width="3" height="{h:.1f}" fill="{_color(safe_int(row.get("total_tokens")))}"><title>{html.escape(row.get("timestamp", ""))} {safe_int(row.get("total_tokens"))} tokens</title></rect>')
+            tokens = safe_int(row.get("cumulative_delta_tokens"))
+            h = 4 + min(20, math.log10(tokens + 1) * 4)
+            marks.append(f'<rect x="{x:.1f}" y="{y + 5 - h:.1f}" width="3" height="{h:.1f}" fill="{_color(tokens)}"><title>{html.escape(row.get("timestamp", ""))} {tokens} cumulative-delta tokens</title></rect>')
     svg = f'<svg viewBox="0 0 {width} {height}" role="img">{"".join(marks)}</svg>'
-    return _html_doc("Top Threads Sparklines", f"<h1>Top Threads Sparklines</h1><p class=\"note\">Top threads by tokens, with burst marks at event grain.</p>{svg}")
+    return _html_doc("Top Threads Sparklines", f"<h1>Top Threads Sparklines</h1><p class=\"note\">Top threads by cumulative-delta tokens, with burst marks at accounting event grain.</p>{svg}")
 
 
 def _burnup(events: list[dict[str, str]], entitlements: Path | None) -> str:
@@ -211,7 +220,7 @@ def _burnup(events: list[dict[str, str]], entitlements: Path | None) -> str:
     cumulative = []
     total = 0
     for row in sorted_events:
-        total += safe_int(row.get("total_tokens"))
+        total += safe_int(row.get("cumulative_delta_tokens"))
         cumulative.append((parse_time(row.get("timestamp")), total))
     entitlement_rows = read_tsv(entitlements.expanduser()) if entitlements and entitlements.exists() else []
     max_y = max([total, *[safe_int(row.get("base_subscription_tokens")) + safe_int(row.get("purchased_tokens")) for row in entitlement_rows], 1])
@@ -234,4 +243,4 @@ def _burnup(events: list[dict[str, str]], entitlements: Path | None) -> str:
     if entitlement_rows:
         note = "Green line is base subscription allocation; orange line is base plus purchased allocation."
     svg = f'<svg viewBox="0 0 {width} {height}" role="img"><line class="grid" x1="70" y1="{height-60}" x2="{width-30}" y2="{height-60}"/>{"".join(overlays)}<polyline fill="none" stroke="#2f80ed" stroke-width="2" points="{" ".join(points)}"/></svg>'
-    return _html_doc("Cumulative Burnup Entitlements", f"<h1>Cumulative Burnup Entitlements</h1><p class=\"note\">{html.escape(note)}</p>{svg}")
+    return _html_doc("Cumulative Burnup Entitlements", f"<h1>Cumulative Burnup Entitlements</h1><p class=\"note\">Cumulative usage uses cumulative-delta token accounting. {html.escape(note)}</p>{svg}")

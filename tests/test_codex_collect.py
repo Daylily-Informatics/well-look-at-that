@@ -69,4 +69,9 @@ def test_collect_codex_writes_event_grain_tsv(tmp_path: Path) -> None:
     assert events[0]["thread_id"] == THREAD_ID
     assert events[0]["github_repo"] == "Daylily-Informatics/example"
     assert events[0]["total_tokens"] == "19"
+    raw_events = read_tsv(output_root / "data" / "raw_token_events.tsv")
+    assert len(raw_events) == 1
+    assert raw_events[0]["session_segment_id"]
+    assert raw_events[0]["source_path"] == str(session)
+    assert raw_events[0]["last_token_usage_hash"]
     assert not list(output_root.glob("**/*.csv"))
