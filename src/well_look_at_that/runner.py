@@ -32,6 +32,7 @@ def backfill_run(
     since_spec: str,
     skip_github: bool,
     max_repos: int,
+    repo_roots: list[Path] | None = None,
     no_reports: bool = False,
     no_plots: bool = False,
 ) -> dict[str, Any]:
@@ -41,7 +42,13 @@ def backfill_run(
     since = parse_window(since_spec)
     label = window_label(since_spec)
     counts: dict[str, Any] = {"run_id": run_id, "since": since_spec}
-    codex = collect_codex(codex_home=codex_home, output_root=output_root, since=since, run_id=run_id)
+    codex = collect_codex(
+        codex_home=codex_home,
+        output_root=output_root,
+        since=since,
+        run_id=run_id,
+        repo_roots=repo_roots,
+    )
     counts.update(codex["counts"])
     if skip_github:
         counts["github_skipped"] = 1

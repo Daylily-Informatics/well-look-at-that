@@ -8,7 +8,6 @@ from well_look_at_that.collectors.codex import collect_codex
 from well_look_at_that.model import parse_window
 from well_look_at_that.tsv import read_tsv
 
-
 THREAD_ID = "019f0000-0000-7000-8000-000000000001"
 
 

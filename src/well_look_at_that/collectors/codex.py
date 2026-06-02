@@ -46,7 +46,7 @@ def _infer_thread_id_from_path(path: Path) -> str:
     return ""
 
 
-def _git_value(cwd: str, args: list[str]) -> str:
+def _git_value(cwd: str | Path, args: list[str]) -> str:
     if not cwd:
         return ""
     path = Path(cwd).expanduser()
@@ -68,11 +68,38 @@ def _git_value(cwd: str, args: list[str]) -> str:
     return result.stdout.strip()
 
 
-def _repo_info(cwd: str) -> dict[str, str]:
+def _is_relative_to(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return False
+    return True
+
+
+def _explicit_repo_base(cwd: str, repo_roots: list[Path]) -> Path | None:
+    if not cwd or not repo_roots:
+        return None
+    cwd_path = Path(cwd).expanduser()
+    roots = [root.expanduser() for root in repo_roots]
+    for candidate in (cwd_path, *cwd_path.parents):
+        if not any(candidate == root or _is_relative_to(candidate, root) for root in roots):
+            continue
+        if (candidate / ".git").exists():
+            return candidate
+    return None
+
+
+def _repo_info(cwd: str, repo_roots: list[Path] | None = None) -> dict[str, str]:
+    roots = repo_roots or []
     repo_root = _git_value(cwd, ["rev-parse", "--show-toplevel"])
-    git_origin = _git_value(cwd, ["config", "--get", "remote.origin.url"])
-    git_branch = _git_value(cwd, ["rev-parse", "--abbrev-ref", "HEAD"])
-    git_sha = _git_value(cwd, ["rev-parse", "HEAD"])
+    git_cwd = Path(repo_root) if repo_root else _explicit_repo_base(cwd, roots)
+    if git_cwd is None:
+        git_cwd = Path(cwd).expanduser() if cwd else Path()
+    if not repo_root and git_cwd:
+        repo_root = _git_value(git_cwd, ["rev-parse", "--show-toplevel"])
+    git_origin = _git_value(git_cwd, ["config", "--get", "remote.origin.url"])
+    git_branch = _git_value(git_cwd, ["rev-parse", "--abbrev-ref", "HEAD"])
+    git_sha = _git_value(git_cwd, ["rev-parse", "HEAD"])
     github_repo = parse_github_repo(git_origin)
     return {
         "repo_root": repo_root,
@@ -91,7 +118,11 @@ def _row_get(row: sqlite3.Row, *names: str) -> Any:
     return ""
 
 
-def _load_state_threads(codex_home: Path, since) -> dict[str, dict[str, Any]]:
+def _load_state_threads(
+    codex_home: Path,
+    since,
+    repo_roots: list[Path],
+) -> dict[str, dict[str, Any]]:
     state_db = codex_home / "state_5.sqlite"
     if not state_db.exists():
         return {}
@@ -114,7 +145,7 @@ def _load_state_threads(codex_home: Path, since) -> dict[str, dict[str, Any]]:
             if updated and updated < since:
                 continue
             cwd = str(_row_get(row, "cwd"))
-            repo = _repo_info(cwd)
+            repo = _repo_info(cwd, repo_roots)
             github_repo = str(_row_get(row, "github_repo", "githubRepo")) or repo["github_repo"]
             branch = str(_row_get(row, "git_branch", "gitBranch")) or repo["git_branch"]
             title = str(_row_get(row, "title"))
@@ -160,9 +191,10 @@ def _thread_from_session(
     timestamp: str,
     session_meta: dict[str, Any],
     run_id: str,
+    repo_roots: list[Path],
 ) -> dict[str, Any]:
     cwd = str(session_meta.get("cwd") or "")
-    repo = _repo_info(cwd)
+    repo = _repo_info(cwd, repo_roots)
     title = str(session_meta.get("title") or "")
     branch = repo["git_branch"]
     github_repo = repo["github_repo"]
@@ -204,6 +236,7 @@ def collect_codex(
     output_root: Path,
     since,
     run_id: str,
+    repo_roots: list[Path] | None = None,
 ) -> dict[str, Any]:
     codex_home = codex_home.expanduser()
     output_root = output_root.expanduser()
@@ -214,7 +247,12 @@ def collect_codex(
     if not paths:
         raise RuntimeError(f"No Codex session JSONL files found under {codex_home}")
 
-    threads = _load_state_threads(codex_home, since)
+    explicit_roots = [root.expanduser() for root in (repo_roots or [])]
+    missing_roots = [str(root) for root in explicit_roots if not root.exists()]
+    if missing_roots:
+        raise FileNotFoundError(f"Explicit repo roots do not exist: {', '.join(missing_roots)}")
+
+    threads = _load_state_threads(codex_home, since, explicit_roots)
     counts = Counter({"jsonl_files_seen": len(paths), "state_threads_loaded": len(threads)})
     events: list[dict[str, Any]] = []
 
@@ -251,6 +289,7 @@ def collect_codex(
                             str(record.get("timestamp") or ""),
                             session_meta,
                             run_id,
+                            explicit_roots,
                         )
                         thread["session_cwd"] = str(session_meta.get("cwd") or thread.get("session_cwd") or "")
                         thread["rollout_path"] = thread.get("rollout_path") or str(path)
@@ -282,6 +321,7 @@ def collect_codex(
                         str(record.get("timestamp") or ""),
                         session_meta,
                         run_id,
+                        explicit_roots,
                     )
                 thread = threads[thread_id]
                 info = payload.get("info") or {}

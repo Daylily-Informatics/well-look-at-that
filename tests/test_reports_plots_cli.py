@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import inspect
 from pathlib import Path
 
 from typer.testing import CliRunner
 
 from well_look_at_that.cli import app, spec
-from well_look_at_that.model import TOKEN_EVENT_COLUMNS, THREAD_COLUMNS, parse_window
+from well_look_at_that.model import THREAD_COLUMNS, TOKEN_EVENT_COLUMNS, parse_window
 from well_look_at_that.plots import generate_plots
 from well_look_at_that.reports import generate_reports, validate_outputs
 from well_look_at_that.tsv import read_tsv, write_tsv
@@ -135,3 +136,9 @@ def test_cli_version_json() -> None:
     result = CliRunner().invoke(app, ["--json", "version"])
     assert result.exit_code == 0
     assert "well-look-at-that" in result.stdout
+
+
+def test_cli_backfill_exposes_repo_roots_parameter() -> None:
+    command = app._cli_core_yo_registry.get_command("backfill")
+    assert command is not None
+    assert "repo_roots" in inspect.signature(command.callback).parameters

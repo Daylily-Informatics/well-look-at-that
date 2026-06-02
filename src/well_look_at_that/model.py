@@ -7,10 +7,11 @@ import re
 from pathlib import Path
 from typing import Any
 
-UTC = dt.timezone.utc
+UTC = dt.UTC
 
 DEFAULT_CODEX_HOME = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex")
 DEFAULT_OUTPUT_ROOT = DEFAULT_CODEX_HOME / "docs" / "codex-github-outcomes"
+DEFAULT_REPO_ROOTS: tuple[Path, ...] = ()
 
 OUTCOME_TYPES = (
     "feature",

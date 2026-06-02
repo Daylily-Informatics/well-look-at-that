@@ -49,6 +49,10 @@ def backfill(
     since: Annotated[str, typer.Option("--since", help="Window start such as 30d or 2026-01-01T00:00:00Z.")] = "30d",
     skip_github: Annotated[bool, typer.Option("--skip-github", help="Do not call gh for GitHub activity.")] = False,
     max_repos: Annotated[int, typer.Option("--max-repos", help="Maximum GitHub repos to query.")] = 120,
+    repo_roots: Annotated[
+        list[Path] | None,
+        typer.Option("--repo-root", help="Explicit local repo/workspace roots for attribution."),
+    ] = None,
     no_reports: Annotated[bool, typer.Option("--no-reports", help="Only collect data TSVs.")] = False,
     no_plots: Annotated[bool, typer.Option("--no-plots", help="Skip plot generation.")] = False,
 ) -> None:
@@ -60,6 +64,7 @@ def backfill(
             since_spec=since,
             skip_github=skip_github,
             max_repos=max_repos,
+            repo_roots=repo_roots,
             no_reports=no_reports,
             no_plots=no_plots,
         )
@@ -72,6 +77,7 @@ def run_incremental(
     window: Annotated[str, typer.Option("--window")] = "30d",
     skip_github: Annotated[bool, typer.Option("--skip-github")] = False,
     max_repos: Annotated[int, typer.Option("--max-repos")] = 120,
+    repo_roots: Annotated[list[Path] | None, typer.Option("--repo-root")] = None,
 ) -> None:
     """Run the rolling collection path for scheduled ongoing use."""
     _emit(
@@ -81,6 +87,7 @@ def run_incremental(
             since_spec=window,
             skip_github=skip_github,
             max_repos=max_repos,
+            repo_roots=repo_roots,
         )
     )
 

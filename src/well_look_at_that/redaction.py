@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Iterable
 
 SECRET_PATTERNS = [
     ("github_token", re.compile(r"gh[pousr]_[A-Za-z0-9_]{20,}")),

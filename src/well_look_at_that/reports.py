@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections import Counter, defaultdict
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -183,7 +183,7 @@ def _summary_markdown(
         "",
         f"- Run: `{run_id}`",
         f"- Window: `{window_label}`",
-        f"- Native grain: one `token_count` event",
+        "- Native grain: one `token_count` event",
         f"- Token events: {len(events):,}",
         f"- Threads with token events: {len(thread_ids):,}",
         f"- Indexed thread records: {len(threads):,}",
