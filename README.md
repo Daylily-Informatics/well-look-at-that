@@ -42,6 +42,10 @@ Report language is explicit:
 - `observed_event_sum_tokens` is the old raw event-row sum and is diagnostic.
 - `final_session_total_tokens` is the primary quota approximation.
 - `cumulative_delta_tokens` is the basis for day/week/month allocation and burnup plots.
+- `final_thread_total_tokens` is a logical-thread max cumulative diagnostic and can undercount resumed or multi-segment threads.
+- `unique_last_per_thread_turn_tokens` is the exact thread/turn/hash diagnostic estimate.
+- `unique_last_per_session_turn_tokens` is the session/turn/hash diagnostic estimate.
+- `unique_last_per_turn_tokens` is a deprecated compatibility alias for the session-turn estimate.
 - `deduped_turn_tokens` is a diagnostic turn estimate, not a billing total.
 
 ## Requirements
@@ -66,7 +70,7 @@ If GitHub access is intentionally unavailable, use `--skip-github`. Without `--s
 Use this for normal local use before the package is published to an internal or public package index:
 
 ```console
-python -m pip install "well-look-at-that @ git+https://github.com/Daylily-Informatics/well-look-at-that.git@0.1.4"
+python -m pip install "well-look-at-that @ git+https://github.com/Daylily-Informatics/well-look-at-that.git@0.2.1"
 ```
 
 That installs both command names:
@@ -97,7 +101,7 @@ Expected version for this release:
 ```json
 {
   "app": "well-look-at-that",
-  "version": "0.1.4"
+  "version": "0.2.1"
 }
 ```
 
@@ -207,7 +211,9 @@ plots/latest_<window>_top_threads_sparklines.html
 runs/<run_id>_execution_ledger.md
 ```
 
-The raw event-grain TSV is the source evidence table. Thread, repo, workstream, outcome, day, week, and month reports aggregate upward from derived accounting views.
+The raw event-grain TSV is the source evidence table. `data/codex_token_events.tsv` is a backward-compatible alias/copy of that raw event data. Thread, repo, workstream, outcome, day, week, and month reports aggregate upward from derived accounting views and direct raw-row diagnostics.
+
+See `examples/` for TSV entitlement data and explicit backfill/validate command examples.
 
 ## Token Value And Entitlements
 

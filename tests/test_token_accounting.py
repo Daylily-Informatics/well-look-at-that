@@ -73,9 +73,14 @@ def test_repeated_last_and_cumulative_are_diagnostic_not_accounting() -> None:
     assert session["observed_event_sum_tokens"] == 30
     assert session["final_session_total_tokens"] == 10
     assert session["cumulative_delta_tokens"] == 10
+    assert session["unique_last_per_session_turn_tokens"] == 10
     assert session["unique_last_per_turn_tokens"] == 10
     assert session["repeated_last_usage_count"] == 2
     assert session["repeated_cumulative_count"] == 2
+    thread = accounting["thread_rollups"][0]
+    assert thread["unique_last_per_thread_turn_tokens"] == 10
+    assert thread["unique_last_per_session_turn_tokens"] == 10
+    assert thread["repeated_last_usage_count"] == 2
 
 
 def test_missing_turn_id_keeps_event_grain_for_turn_estimate() -> None:
@@ -87,7 +92,9 @@ def test_missing_turn_id_keeps_event_grain_for_turn_estimate() -> None:
     session = accounting["session_rollups"][0]
 
     assert session["missing_turn_id_count"] == 2
+    assert session["unique_last_per_session_turn_tokens"] == 10
     assert session["unique_last_per_turn_tokens"] == 10
+    assert accounting["thread_rollups"][0]["unique_last_per_thread_turn_tokens"] == 10
     assert len(accounting["turn_estimates"]) == 2
 
 
@@ -137,8 +144,101 @@ def test_duplicate_active_archived_segment_is_excluded_from_primary_accounting()
     assert sessions["archived-seg"]["duplicate_segment_of"] == "active-seg"
     assert thread["session_segment_count"] == 2
     assert thread["included_session_segment_count"] == 1
+    assert thread["excluded_duplicate_session_segment_count"] == 1
     assert thread["active_archived_overlap"] == 1
     assert thread["final_thread_total_tokens"] == 10
+
+
+def test_multi_segment_thread_keeps_thread_max_diagnostic_separate() -> None:
+    rows = [
+        _row(
+            event_id="s1-e1",
+            segment="seg-1",
+            line=1,
+            total=100,
+            cumulative=100,
+            source_path="/tmp/codex/archived_sessions/a.jsonl",
+            active=0,
+            archived=1,
+            payload_hash="seg1",
+        ),
+        _row(
+            event_id="s2-e1",
+            segment="seg-2",
+            line=2,
+            total=50,
+            cumulative=50,
+            source_path="/tmp/codex/archived_sessions/b.jsonl",
+            active=0,
+            archived=1,
+            payload_hash="seg2",
+        ),
+    ]
+    accounting = build_accounting(rows)
+    thread = accounting["thread_rollups"][0]
+    thread_reconciliation = [row for row in accounting["reconciliation"] if row["grain"] == "thread"][0]
+
+    assert thread["session_segment_count"] == 2
+    assert thread["final_session_total_tokens"] == 150
+    assert thread["cumulative_delta_tokens"] == 150
+    assert thread["final_thread_total_tokens"] == 100
+    assert thread["max_cumulative_tokens"] == 100
+    assert thread_reconciliation["session_segment_count"] == 2
+    assert thread_reconciliation["final_thread_total_tokens"] == 100
+
+
+def test_method_d_is_thread_turn_scoped_not_session_turn_scoped() -> None:
+    rows = [
+        _row(
+            event_id="s1-e1",
+            segment="seg-1",
+            thread="thread-1",
+            turn="turn-same",
+            line=1,
+            total=10,
+            cumulative=10,
+            source_path="/tmp/codex/archived_sessions/a.jsonl",
+            payload_hash="seg1",
+        ),
+        _row(
+            event_id="s2-e1",
+            segment="seg-2",
+            thread="thread-1",
+            turn="turn-same",
+            line=2,
+            total=10,
+            cumulative=10,
+            source_path="/tmp/codex/archived_sessions/b.jsonl",
+            payload_hash="seg2",
+        ),
+    ]
+    thread = build_accounting(rows)["thread_rollups"][0]
+
+    assert thread["distinct_turn_count"] == 1
+    assert thread["unique_last_per_thread_turn_tokens"] == 10
+    assert thread["unique_last_per_session_turn_tokens"] == 20
+    assert thread["unique_last_per_turn_tokens"] == 20
+    assert thread["repeated_last_usage_count"] == 1
+    assert thread["repeated_cumulative_count"] == 1
+
+
+def test_time_reconciliation_populates_event_counts_and_deltas() -> None:
+    rows = [
+        _row(event_id="d1-e1", line=1, total=10, cumulative=10),
+        _row(event_id="d1-e2", line=2, total=5, cumulative=15),
+        {
+            **_row(event_id="d2-e1", line=3, total=15, cumulative=30),
+            "timestamp": "2026-06-02T00:00:03Z",
+        },
+    ]
+    accounting = build_accounting(rows)
+    event_count = len(accounting["event_accounting"])
+    delta_total = sum(row["cumulative_delta_tokens"] for row in accounting["event_accounting"])
+
+    for grain in ("day", "week", "month"):
+        grain_rows = [row for row in accounting["reconciliation"] if row["grain"] == grain]
+        assert sum(row["token_event_count"] for row in grain_rows) == event_count
+        assert sum(row["cumulative_delta_tokens"] for row in grain_rows) == delta_total
 
 
 def test_collector_writes_raw_event_metadata_and_compatibility_tsv(tmp_path: Path) -> None:

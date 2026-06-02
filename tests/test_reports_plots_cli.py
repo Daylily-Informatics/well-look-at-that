@@ -29,9 +29,7 @@ def _seed_output(output_root: Path) -> None:
         ],
         THREAD_COLUMNS,
     )
-    write_tsv(
-        output_root / "data" / "codex_token_events.tsv",
-        [
+    token_rows = [
             {
                 "event_id": "e1",
                 "thread_id": "t1",
@@ -78,7 +76,15 @@ def _seed_output(output_root: Path) -> None:
                 "outcome_type": "feature",
                 "attribution_confidence": "strong",
             },
-        ],
+        ]
+    write_tsv(
+        output_root / "data" / "codex_token_events.tsv",
+        token_rows,
+        TOKEN_EVENT_COLUMNS,
+    )
+    write_tsv(
+        output_root / "data" / "raw_token_events.tsv",
+        token_rows,
         TOKEN_EVENT_COLUMNS,
     )
 
