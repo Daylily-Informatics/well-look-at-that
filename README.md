@@ -20,9 +20,12 @@ well-look-at-that report --window 30d --output-root ~/.codex/docs/codex-github-o
 well-look-at-that plot --window 30d --output-root ~/.codex/docs/codex-github-outcomes
 well-look-at-that allocate-value --window 30d --output-root ~/.codex/docs/codex-github-outcomes --entitlements ~/.codex/docs/codex-github-outcomes/config/token_entitlements.tsv
 well-look-at-that validate --window 30d --output-root ~/.codex/docs/codex-github-outcomes
+wlat backfill --since 2026-01-01T00:00:00Z --repo-root ~/projects --repo-root ~/IGNORE-THIS --output-root ~/.codex/docs/codex-github-outcomes-jan-2026
 ```
 
 Use `--skip-github` when authenticated `gh` access is intentionally unavailable. Without `--skip-github`, GitHub collection fails explicitly if `gh` is missing, unauthenticated, or unable to read a repo.
+
+Use repeated `--repo-root` values to provide explicit local roots for attribution when historical Codex `cwd` values point at moved or nested working directories. This is explicit input; the tool does not discover alternate roots silently.
 
 ## Outputs
 
@@ -60,5 +63,7 @@ When entitlement rows are present, the burnup plot overlays base subscription al
 
 ```console
 python -m pytest -q
+python -m pytest --cov=well_look_at_that --cov-report=term-missing --cov-fail-under=45
+ruff check src tests
 python -m build
 ```

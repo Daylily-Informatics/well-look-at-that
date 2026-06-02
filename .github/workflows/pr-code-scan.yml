@@ -1,0 +1,37 @@
+name: PR Code Scan
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  scan:
+    name: lint-test-build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install package
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+
+      - name: Lint
+        run: ruff check src tests
+
+      - name: Compile
+        run: python -m compileall -q src tests
+
+      - name: Test with coverage
+        run: python -m pytest --cov=well_look_at_that --cov-report=term-missing --cov-fail-under=45
+
+      - name: Build package
+        run: python -m build
