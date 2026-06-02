@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import importlib.metadata
 import shutil
+import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from tests.test_codex_collect import THREAD_ID, _write_jsonl
@@ -24,6 +26,17 @@ def test_console_scripts_include_full_name_and_wlat_alias() -> None:
 def test_tsv_writer_rejects_csv_paths(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="CSV outputs are not supported"):
         write_tsv(tmp_path / "bad.csv", [], ["a"])
+
+
+def test_tsv_writer_redacts_secret_like_cells(tmp_path: Path) -> None:
+    path = tmp_path / "safe.tsv"
+    write_tsv(
+        path,
+        [{"note": "ghp_abcdefghijklmnopqrstuvwxyz123456"}],
+        ["note"],
+    )
+    rows = read_tsv(path)
+    assert rows[0]["note"] == "[REDACTED:github_token]"
 
 
 def test_time_and_repo_parsers_are_explicit() -> None:
@@ -78,6 +91,62 @@ def test_github_collector_requires_gh(monkeypatch: pytest.MonkeyPatch, tmp_path:
             since=parse_window("2026-01-01T00:00:00Z"),
             run_id="20260602T000000Z",
         )
+
+
+def test_github_collector_accepts_plain_text_auth_status(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    output_root = tmp_path / "out"
+    write_tsv(
+        output_root / "data" / "codex_threads.tsv",
+        [],
+        ["thread_id", "github_repo"],
+    )
+    monkeypatch.setattr(shutil, "which", lambda _: "/usr/bin/gh")
+
+    def fake_run(*args, **kwargs):
+        assert args[0] == ["gh", "auth", "status"]
+        return SimpleNamespace(returncode=0, stdout="Logged in to github.com\n", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    counts = collect_github(
+        output_root=output_root,
+        since=parse_window("2026-01-01T00:00:00Z"),
+        run_id="20260602T000000Z",
+    )
+    assert counts == {"github_repos_seen": 0, "github_events_written": 0}
+
+
+def test_github_collector_uses_get_for_fielded_api_calls(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    output_root = tmp_path / "out"
+    write_tsv(
+        output_root / "data" / "codex_threads.tsv",
+        [{"thread_id": "t1", "github_repo": "Daylily-Informatics/example"}],
+        ["thread_id", "github_repo"],
+    )
+    monkeypatch.setattr(shutil, "which", lambda _: "/usr/bin/gh")
+    calls: list[list[str]] = []
+
+    def fake_run(args, **kwargs):
+        calls.append(args)
+        if args == ["gh", "auth", "status"]:
+            return SimpleNamespace(returncode=0, stdout="Logged in to github.com\n", stderr="")
+        assert args[:3] == ["gh", "api", "--method"]
+        assert args[3] == "GET"
+        return SimpleNamespace(returncode=0, stdout="[]", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    counts = collect_github(
+        output_root=output_root,
+        since=parse_window("2026-01-01T00:00:00Z"),
+        run_id="20260602T000000Z",
+    )
+    assert counts == {"github_repos_seen": 1, "github_events_written": 0}
+    assert len([call for call in calls if call[:2] == ["gh", "api"]]) == 3
 
 
 def test_backfill_run_creates_reports_plots_and_ledger(tmp_path: Path) -> None:

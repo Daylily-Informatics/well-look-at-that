@@ -5,6 +5,8 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
+from well_look_at_that.redaction import redact_text
+
 
 def require_tsv_path(path: Path) -> None:
     if path.suffix.lower() == ".csv":
@@ -26,7 +28,7 @@ def write_tsv(path: Path, rows: Iterable[dict[str, Any]], fieldnames: list[str])
         )
         writer.writeheader()
         for row in rows:
-            writer.writerow({key: "" if row.get(key) is None else row.get(key) for key in fieldnames})
+            writer.writerow({key: _cell(row.get(key)) for key in fieldnames})
 
 
 def append_tsv(path: Path, rows: Iterable[dict[str, Any]], fieldnames: list[str]) -> None:
@@ -44,7 +46,7 @@ def append_tsv(path: Path, rows: Iterable[dict[str, Any]], fieldnames: list[str]
         if not exists:
             writer.writeheader()
         for row in rows:
-            writer.writerow({key: "" if row.get(key) is None else row.get(key) for key in fieldnames})
+            writer.writerow({key: _cell(row.get(key)) for key in fieldnames})
 
 
 def read_tsv(path: Path) -> list[dict[str, str]]:
@@ -53,3 +55,9 @@ def read_tsv(path: Path) -> list[dict[str, str]]:
         return []
     with path.open("r", encoding="utf-8", newline="") as handle:
         return list(csv.DictReader(handle, delimiter="\t"))
+
+
+def _cell(value: Any) -> str:
+    if value is None:
+        return ""
+    return redact_text(str(value))

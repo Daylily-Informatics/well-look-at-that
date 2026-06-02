@@ -19,9 +19,18 @@
 | WLA2-002 | tests | Add focused tests for TSV/no-CSV, CLI metadata, redaction, value allocation, runner/report outputs, and GitHub collector error contracts. | SUCCESS | contract_test | Gate 1 | Agent B | `tests/test_contracts.py`, `tests/test_reports_plots_cli.py` |  | Test count increased to 12 and covers requested contracts. |
 | WLA2-003 | ci | Add simple PR code scan action for lint, test coverage threshold, compile/build checks. | SUCCESS | feature_implementation | Gate 1 | Agent C | `.github/workflows/pr-code-scan.yml` |  | PR/push workflow runs `ruff`, compile, pytest coverage fail-under 45, and build. |
 | WLA2-004 | coverage | Verify test coverage is greater than 45%. | SUCCESS | contract_test | Gate 2 | Agent F | `.venv/bin/python -m pytest --cov=well_look_at_that --cov-report=term-missing --cov-fail-under=45` |  | 12 passed; total coverage 77.18%. |
-| WLA2-005 | publish | Commit all intended work, push a branch, open PR to main, merge when green, pull main, tag `0.1.0`, and push the tag. | OPEN | feature_implementation | Gate 3 | Agent A | pending |  |  |
-| WLA2-006 | report | Run January 2026 onward report generation with explicit repo roots `/Users/jmajor/IGNORE-THIS` and `/Users/jmajor/projects`. | OPEN | feature_implementation | Gate 4 | Agent D | pending |  |  |
+| WLA2-005 | publish | Commit all intended work, push a branch, open PR to main, merge when green, pull main, tag `0.1.0`, and push the tag. | SUCCESS | feature_implementation | Gate 3 | Agent A | PR `#2`, merged main commit `6faa6229cf81627640ab4b1760e5bd5db457f388`, tag `0.1.0` |  | PR checks passed, PR merged, local main pulled, annotated tag `0.1.0` pushed. |
+| WLA2-006 | report | Run January 2026 onward report generation with explicit repo roots `/Users/jmajor/IGNORE-THIS` and `/Users/jmajor/projects`. | SUCCESS | feature_implementation | Gate 4 | Agent D | `/Users/jmajor/.codex/docs/codex-github-outcomes-jan-2026-wlat-20260602T085347Z` |  | Clean run `20260602T085356Z` succeeded: 887,716 token events, 1,520 threads, 5,395 GitHub events, 0 CSV files, 0 redaction findings. |
 
 ## Final Acceptance
 
-Pending implementation, validation, PR merge, tag push, and report artifact inventory.
+- Local validation before PR: `ruff check src tests`, `compileall`, `pytest --cov=well_look_at_that --cov-fail-under=45`, and `python -m build` passed.
+- PR validation: `lint-test-build`, `Analyze (python)`, and `CodeQL` passed on PR `#2`.
+- `0.1.0` tag type: annotated tag.
+- Post-release report-run fixes found and repaired:
+  - `gh auth status` is plain text and is no longer parsed as JSON.
+  - `gh api` calls with fields now force `--method GET`.
+  - TSV writes redact secret-like cell values before persistence.
+- Final local validation after report-run fixes: 15 tests passed, coverage 78.94%.
+- All rows terminal: yes.
+- Objective complete: yes.

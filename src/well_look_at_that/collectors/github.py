@@ -26,6 +26,20 @@ def _gh_json(args: list[str], *, timeout: int = 60) -> Any:
     return json.loads(result.stdout or "[]")
 
 
+def _gh_auth_status(*, timeout: int = 20) -> None:
+    if shutil.which("gh") is None:
+        raise RuntimeError("GitHub collection requires the gh CLI, but gh is not on PATH.")
+    result = subprocess.run(
+        ["gh", "auth", "status"],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"gh auth status failed: {result.stderr.strip()}")
+
+
 def _repo_names(output_root: Path, max_repos: int) -> list[str]:
     rows = read_tsv(output_root / "data" / "codex_threads.tsv")
     repos = sorted({row.get("github_repo", "") for row in rows if row.get("github_repo")})
@@ -48,10 +62,10 @@ def collect_github(
     repos = _repo_names(output_root, max_repos)
     rows: list[dict[str, Any]] = []
     since_iso = isoformat(since)
-    _gh_json(["auth", "status"], timeout=20)
+    _gh_auth_status()
     for repo in repos:
         commits = _gh_json(
-            ["api", f"repos/{repo}/commits", "--paginate", "-f", f"since={since_iso}"],
+            ["api", "--method", "GET", f"repos/{repo}/commits", "--paginate", "-f", f"since={since_iso}"],
             timeout=90,
         )
         if isinstance(commits, dict):
@@ -85,7 +99,19 @@ def collect_github(
             )
 
         pulls = _gh_json(
-            ["api", f"repos/{repo}/pulls", "--paginate", "-f", "state=all", "-f", "sort=updated", "-f", "direction=desc"],
+            [
+                "api",
+                "--method",
+                "GET",
+                f"repos/{repo}/pulls",
+                "--paginate",
+                "-f",
+                "state=all",
+                "-f",
+                "sort=updated",
+                "-f",
+                "direction=desc",
+            ],
             timeout=90,
         )
         if isinstance(pulls, dict):
@@ -119,7 +145,19 @@ def collect_github(
             )
 
         issues = _gh_json(
-            ["api", f"repos/{repo}/issues", "--paginate", "-f", "state=all", "-f", "sort=updated", "-f", "direction=desc"],
+            [
+                "api",
+                "--method",
+                "GET",
+                f"repos/{repo}/issues",
+                "--paginate",
+                "-f",
+                "state=all",
+                "-f",
+                "sort=updated",
+                "-f",
+                "direction=desc",
+            ],
             timeout=90,
         )
         if isinstance(issues, dict):
