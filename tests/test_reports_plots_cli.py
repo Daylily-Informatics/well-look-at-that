@@ -43,6 +43,7 @@ def _seed_output(output_root: Path) -> None:
                 "cached_input_tokens": 10,
                 "output_tokens": 30,
                 "reasoning_output_tokens": 20,
+                "model": "gpt-5.3-codex",
                 "cumulative_total_tokens": 100,
                 "cumulative_input_tokens": 40,
                 "cumulative_cached_input_tokens": 10,
@@ -66,6 +67,7 @@ def _seed_output(output_root: Path) -> None:
                 "cached_input_tokens": 5,
                 "output_tokens": 15,
                 "reasoning_output_tokens": 10,
+                "model": "gpt-5.3-codex",
                 "cumulative_total_tokens": 150,
                 "cumulative_input_tokens": 60,
                 "cumulative_cached_input_tokens": 15,
@@ -147,6 +149,40 @@ def test_reports_plots_and_value_use_tsv(tmp_path: Path) -> None:
     assert validation["status"] == "SUCCESS"
     assert read_tsv(output_root / "data" / "token_value_allocations.tsv")[1]["funding_source"] == "purchased_tokens"
     assert not list(output_root.glob("**/*.csv"))
+
+
+def test_reports_write_economic_cost_scenarios_from_price_config(tmp_path: Path) -> None:
+    output_root = tmp_path / "out"
+    _seed_output(output_root)
+    price_config = output_root / "config" / "token_prices.yml"
+    price_config.parent.mkdir(parents=True, exist_ok=True)
+    price_config.write_text(
+        "\n".join(
+            [
+                "currency: USD",
+                "purchased_usd_per_credit: 0.04",
+                "models:",
+                "  GPT-5.3-Codex:",
+                "    input_credits_per_1m: 43.75",
+                "    cached_input_credits_per_1m: 4.375",
+                "    output_credits_per_1m: 350",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    generate_reports(
+        output_root=output_root,
+        since=parse_window("2026-01-01T00:00:00Z"),
+        window_label="30d",
+        run_id="20260602T000000Z",
+        price_config=price_config,
+    )
+
+    cost_rows = read_tsv(output_root / "reports" / "economic_cost_scenarios.tsv")
+    assert cost_rows
+    assert cost_rows[0]["model"] == "gpt-5.3-codex"
+    assert float(cost_rows[0]["credits"]) > 0
+    assert float(cost_rows[0]["usd"]) > 0
 
 
 def test_cli_registry_exposes_expected_commands() -> None:

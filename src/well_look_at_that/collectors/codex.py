@@ -162,7 +162,7 @@ def _load_state_threads(
                 continue
             updated = parse_time(_row_get(row, "updated_at", "updatedAt"))
             created = parse_time(_row_get(row, "created_at", "createdAt"))
-            if updated and updated < since:
+            if since is not None and updated and updated < since:
                 continue
             cwd = str(_row_get(row, "cwd"))
             repo = _repo_info(cwd, repo_roots)
@@ -254,7 +254,7 @@ def collect_codex(
     *,
     codex_home: Path,
     output_root: Path,
-    since,
+    since=None,
     run_id: str,
     repo_roots: list[Path] | None = None,
 ) -> dict[str, Any]:
@@ -281,6 +281,7 @@ def collect_codex(
         current_thread_id = inferred_thread_id
         current_turn_id = ""
         session_meta: dict[str, Any] = {}
+        first_token_count_in_segment = True
         try:
             handle = path.open("r", encoding="utf-8")
         except OSError:
@@ -328,7 +329,7 @@ def collect_codex(
                 if ts is None:
                     counts["token_events_missing_timestamp"] += 1
                     continue
-                if ts < since:
+                if since is not None and ts < since:
                     continue
                 thread_id = current_thread_id or inferred_thread_id
                 if not thread_id:
@@ -416,6 +417,7 @@ def collect_codex(
                     "credits_balance": "" if credits.get("balance") is None else str(credits.get("balance")),
                     "plan_type": str(rate_limits.get("plan_type") or ""),
                     "rate_limit_reached_type": str(rate_limits.get("rate_limit_reached_type") or ""),
+                    "model": str(thread.get("model") or session_meta.get("model") or ""),
                     "cwd": str(thread.get("cwd") or thread.get("session_cwd") or ""),
                     "repo_root": str(thread.get("repo_root") or ""),
                     "github_repo": str(thread.get("github_repo") or ""),
@@ -428,7 +430,9 @@ def collect_codex(
                     "evidence_path": f"{path}:{line_number}",
                     "sensitivity_notes": "raw prompt and command text excluded",
                     "inserted_by_run": run_id,
+                    "is_session_segment_start": 1 if first_token_count_in_segment else 0,
                 }
+                first_token_count_in_segment = False
                 events.append(event)
                 counts["token_events_extracted"] += 1
                 thread["event_count"] = safe_int(thread.get("event_count")) + 1

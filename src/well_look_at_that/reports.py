@@ -9,6 +9,7 @@ from well_look_at_that.accounting import (
     load_raw_token_events,
     write_accounting_outputs,
 )
+from well_look_at_that.economics import generate_economic_outputs
 from well_look_at_that.model import (
     TOKEN_ACCOUNTING_RECONCILIATION_COLUMNS,
     TOKEN_THREAD_ROLLUP_COLUMNS,
@@ -39,6 +40,9 @@ ROLLUP_METRIC_COLUMNS = [
     "inflation_factor_current_vs_max_cumulative",
     "inflation_factor_current_vs_delta",
     "warning_flags",
+    "period_cumulative_delta_tokens",
+    "period_boundary_uncertain_tokens",
+    "period_uncertainty_pct",
 ]
 
 
@@ -66,7 +70,14 @@ def _write_report_pair(
     write_tsv(report_root / f"latest_{window_label}_{slug}.tsv", rows, columns)
 
 
-def generate_reports(*, output_root: Path, since, window_label: str, run_id: str) -> dict[str, Any]:
+def generate_reports(
+    *,
+    output_root: Path,
+    since,
+    window_label: str,
+    run_id: str,
+    price_config: Path | None = None,
+) -> dict[str, Any]:
     output_root = output_root.expanduser()
     accounting_counts = {}
     if not (output_root / "data" / "token_session_rollups.tsv").exists():
@@ -173,12 +184,20 @@ def generate_reports(*, output_root: Path, since, window_label: str, run_id: str
     )
     (report_root / f"{run_id}_{window_label}_summary.md").write_text(markdown, encoding="utf-8")
     (report_root / f"latest_{window_label}_summary.md").write_text(markdown, encoding="utf-8")
+    economic_counts = generate_economic_outputs(
+        output_root=output_root,
+        since=since,
+        window_label=window_label,
+        run_id=run_id,
+        price_config=price_config,
+    )
     return {
         "report_token_events": len(raw_events),
         "report_threads": len({row.get("thread_id") for row in raw_events if row.get("thread_id")}),
         "report_markdown": str(report_root / f"latest_{window_label}_summary.md"),
         "report_tsv_count": 16,
         **accounting_counts,
+        **economic_counts,
     }
 
 
@@ -193,8 +212,9 @@ def _summary_markdown(
     confidence: list[dict[str, Any]],
 ) -> str:
     observed_event_sum = sum(safe_int(row.get("total_tokens")) for row in raw_events)
-    final_session_total = sum(safe_int(row.get("final_session_total_tokens")) for row in thread_rollups)
-    cumulative_delta = sum(safe_int(row.get("cumulative_delta_tokens")) for row in thread_rollups)
+    intersecting_session_lifetime_total = sum(safe_int(row.get("intersecting_session_lifetime_total_tokens") or row.get("final_session_total_tokens")) for row in thread_rollups)
+    cumulative_delta = sum(safe_int(row.get("period_cumulative_delta_tokens") or row.get("cumulative_delta_tokens")) for row in thread_rollups)
+    boundary_uncertain = sum(safe_int(row.get("period_boundary_uncertain_tokens")) for row in thread_rollups)
     final_thread_total = sum(safe_int(row.get("final_thread_total_tokens")) for row in thread_rollups)
     thread_turn_total = sum(safe_int(row.get("unique_last_per_thread_turn_tokens")) for row in thread_rollups)
     session_turn_total = sum(safe_int(row.get("unique_last_per_session_turn_tokens")) for row in thread_rollups)
@@ -206,17 +226,20 @@ def _summary_markdown(
         f"- Run: `{run_id}`",
         f"- Window: `{window_label}`",
         "- Raw grain: one `token_count` event",
-        "- Accounting grain: session/rollout cumulative segment",
-        "- Primary usage basis: final session cumulative totals and cumulative positive deltas.",
+        "- Accounting grain: event-level positive cumulative deltas computed from full available session history before window filtering.",
+        "- Primary period usage basis: `period_cumulative_delta_tokens`.",
         "- Event-row token sums are diagnostic and likely inflated.",
+        "- Final session totals are lifetime/intersecting-session metrics, not period usage.",
         "- Logical-thread max cumulative totals are diagnostic and can undercount resumed or multi-segment threads.",
         "- Turn estimates are diagnostic, not billing truth.",
         f"- Token events: {len(raw_events):,}",
         f"- Threads with token events: {len(thread_ids):,}",
         f"- Indexed thread records: {len(threads):,}",
         f"- Observed event-row sum tokens (diagnostic): {observed_event_sum:,}",
-        f"- Final session total tokens (primary accounting approximation): {final_session_total:,}",
-        f"- Cumulative delta tokens (time allocation basis): {cumulative_delta:,}",
+        f"- Period cumulative delta tokens (primary economic basis): {cumulative_delta:,}",
+        f"- Boundary uncertain period tokens: {boundary_uncertain:,}",
+        f"- Boundary uncertainty percent: {_pct(boundary_uncertain, cumulative_delta)}%",
+        f"- Intersecting session lifetime tokens (not period usage): {intersecting_session_lifetime_total:,}",
         f"- Final thread max cumulative tokens (diagnostic): {final_thread_total:,}",
         f"- Unique last per thread/turn tokens (diagnostic): {thread_turn_total:,}",
         f"- Unique last per session/turn tokens (diagnostic): {session_turn_total:,}",
@@ -231,31 +254,31 @@ def _summary_markdown(
     for row in repo_rollups:
         repo = row.get("github_repo") or "(no github repo)"
         dest = repo_totals.setdefault(repo, {"final": 0, "delta": 0, "observed": 0})
-        dest["final"] += safe_int(row.get("final_session_total_tokens"))
-        dest["delta"] += safe_int(row.get("cumulative_delta_tokens"))
+        dest["final"] += safe_int(row.get("intersecting_session_lifetime_total_tokens") or row.get("final_session_total_tokens"))
+        dest["delta"] += safe_int(row.get("period_cumulative_delta_tokens") or row.get("cumulative_delta_tokens"))
         dest["observed"] += safe_int(row.get("observed_event_sum_tokens"))
     for repo, count in repo_counter.most_common(20):
         totals = repo_totals.get(repo, {"final": 0, "delta": 0, "observed": 0})
         lines.append(
             f"- `{repo}`: {totals['final']:,} final-session tokens; "
-            f"{totals['delta']:,} delta tokens; {totals['observed']:,} observed event-sum tokens; "
+            f"{totals['delta']:,} period delta tokens; {totals['observed']:,} observed event-sum tokens; "
             f"{count:,} events"
         )
     lines.extend(["", "## Top Outcome Rollups", ""])
-    ranked = sorted(repo_rollups, key=lambda row: -safe_int(row.get("final_session_total_tokens")))[:20]
+    ranked = sorted(repo_rollups, key=lambda row: -safe_int(row.get("period_cumulative_delta_tokens") or row.get("cumulative_delta_tokens")))[:20]
     for row in ranked:
         repo = row.get("github_repo") or "(no github repo)"
         lines.append(
             f"- `{repo}` / `{row.get('workstream_label')}` / `{row.get('outcome_type')}`: "
-            f"{safe_int(row.get('final_session_total_tokens')):,} final-session tokens; "
-            f"{safe_int(row.get('cumulative_delta_tokens')):,} delta tokens; "
+            f"{safe_int(row.get('period_cumulative_delta_tokens') or row.get('cumulative_delta_tokens')):,} period delta tokens; "
+            f"{safe_int(row.get('intersecting_session_lifetime_total_tokens') or row.get('final_session_total_tokens')):,} intersecting-session lifetime tokens; "
             f"{safe_int(row.get('token_event_count')):,} events"
         )
     lines.extend(["", "## Attribution Confidence", ""])
     for row in confidence:
         lines.append(
             f"- `{row.get('attribution_confidence')}`: "
-            f"{safe_int(row.get('final_session_total_tokens')):,} final-session tokens; "
+            f"{safe_int(row.get('period_cumulative_delta_tokens') or row.get('cumulative_delta_tokens')):,} period delta tokens; "
             f"{safe_int(row.get('observed_event_sum_tokens')):,} observed event-sum tokens; "
             f"{safe_int(row.get('token_event_count')):,} events"
         )
@@ -279,6 +302,12 @@ def validate_outputs(*, output_root: Path, run_id: str) -> dict[str, Any]:
     session_rollups = read_tsv(output_root / "data" / "token_session_rollups.tsv")
     thread_rollups = read_tsv(output_root / "data" / "token_thread_rollups.tsv")
     reconciliation = read_tsv(output_root / "data" / "token_accounting_reconciliation.tsv")
+    boundary_diagnostics = read_tsv(output_root / "data" / "window_boundary_diagnostics.tsv")
+    economic_readiness = read_tsv(output_root / "reports" / "economic_readiness.tsv")
+    economic_daily = read_tsv(output_root / "reports" / "economic_token_usage_by_day.tsv")
+    economic_weekly = read_tsv(output_root / "reports" / "economic_token_usage_by_week.tsv")
+    economic_monthly = read_tsv(output_root / "reports" / "economic_token_usage_by_month.tsv")
+    attribution_diagnostics = read_tsv(output_root / "data" / "token_attribution_diagnostics.tsv")
     validation_errors = _accounting_validation_errors(
         raw_events=raw_events,
         events=events,
@@ -287,6 +316,12 @@ def validate_outputs(*, output_root: Path, run_id: str) -> dict[str, Any]:
         session_rollups=session_rollups,
         thread_rollups=thread_rollups,
         reconciliation=reconciliation,
+        boundary_diagnostics=boundary_diagnostics,
+        economic_readiness=economic_readiness,
+        economic_daily=economic_daily,
+        economic_weekly=economic_weekly,
+        economic_monthly=economic_monthly,
+        attribution_diagnostics=attribution_diagnostics,
     )
     status = (
         "SUCCESS"
@@ -307,6 +342,9 @@ def validate_outputs(*, output_root: Path, run_id: str) -> dict[str, Any]:
         "token_session_rollup_count": len(session_rollups),
         "token_thread_rollup_count": len(thread_rollups),
         "token_reconciliation_count": len(reconciliation),
+        "window_boundary_diagnostic_count": len(boundary_diagnostics),
+        "economic_readiness_count": len(economic_readiness),
+        "attribution_diagnostic_count": len(attribution_diagnostics),
         "csv_file_count": len(csv_paths),
         "csv_paths": csv_paths,
         "redaction_scan": scan,
@@ -325,6 +363,12 @@ def _accounting_validation_errors(
     session_rollups: list[dict[str, str]],
     thread_rollups: list[dict[str, str]],
     reconciliation: list[dict[str, str]],
+    boundary_diagnostics: list[dict[str, str]],
+    economic_readiness: list[dict[str, str]],
+    economic_daily: list[dict[str, str]],
+    economic_weekly: list[dict[str, str]],
+    economic_monthly: list[dict[str, str]],
+    attribution_diagnostics: list[dict[str, str]],
 ) -> list[str]:
     errors: list[str] = []
     if len(raw_events) != len(events):
@@ -335,6 +379,10 @@ def _accounting_validation_errors(
     accounting_ids = {row.get("event_id") for row in event_accounting if row.get("event_id")}
     if raw_ids and raw_ids != accounting_ids:
         errors.append("token_event_accounting.tsv event ids do not match raw token events")
+    if event_accounting and not all("previous_cumulative_total_tokens" in row for row in event_accounting):
+        errors.append("token_event_accounting.tsv missing previous cumulative context")
+    if event_accounting and not all("delta_source" in row for row in event_accounting):
+        errors.append("token_event_accounting.tsv missing delta_source")
 
     included_sessions = [row for row in session_rollups if safe_int(row.get("accounting_included"))]
     session_final = sum(safe_int(row.get("final_session_total_tokens")) for row in included_sessions)
@@ -381,6 +429,35 @@ def _accounting_validation_errors(
             safe_int(row.get("cumulative_delta_tokens")) for row in event_accounting
         ):
             errors.append(f"{grain} reconciliation cumulative_delta_tokens does not reconcile")
+
+    if raw_events and not boundary_diagnostics:
+        errors.append("window_boundary_diagnostics.tsv is required for period accounting")
+    if raw_events and not economic_readiness:
+        errors.append("economic_readiness.tsv is required")
+    if raw_events and not attribution_diagnostics:
+        errors.append("token_attribution_diagnostics.tsv is required")
+    for name, rows in (
+        ("economic_token_usage_by_day.tsv", economic_daily),
+        ("economic_token_usage_by_week.tsv", economic_weekly),
+        ("economic_token_usage_by_month.tsv", economic_monthly),
+    ):
+        if raw_events and not rows:
+            errors.append(f"{name} is required")
+        for row in rows:
+            if safe_int(row.get("period_cumulative_delta_tokens")) and not safe_int(row.get("token_event_count")):
+                errors.append(f"{name} has token deltas but zero token_event_count")
+                break
+    economic_totals = {
+        name: sum(safe_int(row.get("period_cumulative_delta_tokens")) for row in rows)
+        for name, rows in (
+            ("day", economic_daily),
+            ("week", economic_weekly),
+            ("month", economic_monthly),
+        )
+        if rows
+    }
+    if len(set(economic_totals.values())) > 1:
+        errors.append(f"economic day/week/month period totals do not reconcile: {economic_totals}")
 
     required_columns = (
         "unique_last_per_thread_turn_tokens",
@@ -491,3 +568,9 @@ def _repeated_usage_count(rows: list[dict[str, str]], column: str) -> int:
             key = (row.get("thread_id", ""), value)
             counts[key] = counts.get(key, 0) + 1
     return sum(max(0, count - 1) for count in counts.values())
+
+
+def _pct(numerator: int, denominator: int) -> str:
+    if denominator <= 0:
+        return "0.000000"
+    return f"{(numerator / denominator) * 100:.6f}"

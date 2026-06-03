@@ -34,14 +34,16 @@ Raw `token_count` events are diagnostic evidence, not validated accounting total
 
 - Raw grain: one `token_count` event in `data/raw_token_events.tsv`.
 - Accounting grain: one session/rollout cumulative segment in `data/token_session_rollups.tsv`.
-- Time allocation grain: positive cumulative deltas in `data/token_event_accounting.tsv`.
+- Time allocation grain: positive cumulative deltas in `data/token_event_accounting.tsv`, computed from full available session history before report-window filtering.
 - Thread grain: rollup across included session segments in `data/token_thread_rollups.tsv`.
 
 Report language is explicit:
 
 - `observed_event_sum_tokens` is the old raw event-row sum and is diagnostic.
-- `final_session_total_tokens` is the primary quota approximation.
-- `cumulative_delta_tokens` is the basis for day/week/month allocation and burnup plots.
+- `final_session_total_tokens` is a lifetime session metric, not period usage.
+- `period_cumulative_delta_tokens` is the primary economic basis for a report window.
+- `cumulative_delta_tokens` is the full-history positive-delta accounting basis.
+- `window_boundary_diagnostics.tsv` records whether first in-window events had a pre-window baseline, were true segment starts, or are boundary-uncertain.
 - `final_thread_total_tokens` is a logical-thread max cumulative diagnostic and can undercount resumed or multi-segment threads.
 - `unique_last_per_thread_turn_tokens` is the exact thread/turn/hash diagnostic estimate.
 - `unique_last_per_session_turn_tokens` is the session/turn/hash diagnostic estimate.
@@ -70,7 +72,7 @@ If GitHub access is intentionally unavailable, use `--skip-github`. Without `--s
 Use this for normal local use before the package is published to an internal or public package index:
 
 ```console
-python -m pip install "well-look-at-that @ git+https://github.com/Daylily-Informatics/well-look-at-that.git@0.2.1"
+python -m pip install "well-look-at-that @ git+https://github.com/Daylily-Informatics/well-look-at-that.git@0.2.2"
 ```
 
 That installs both command names:
@@ -101,9 +103,11 @@ Expected version for this release:
 ```json
 {
   "app": "well-look-at-that",
-  "version": "0.2.1"
+  "version": "0.2.2"
 }
 ```
+
+Release tags are bare semver, for example `0.2.2`; do not prefix versions with `v`.
 
 ## Generate Datasets From Existing Work
 
@@ -113,7 +117,8 @@ Use `backfill` to extract historical Codex usage and optional GitHub activity. T
 
 ```console
 wlat backfill \
-  --since 30d \
+  --last-days 30 \
+  --accounting-mode full-history-delta \
   --codex-home ~/.codex \
   --output-root ~/.codex/docs/codex-github-outcomes \
   --repo-root ~/projects \
@@ -125,6 +130,7 @@ wlat backfill \
 ```console
 wlat backfill \
   --since 2026-01-01T00:00:00Z \
+  --accounting-mode full-history-delta \
   --codex-home ~/.codex \
   --output-root ~/.codex/docs/codex-github-outcomes-jan-2026 \
   --repo-root ~/projects \
@@ -137,7 +143,8 @@ Use this when you want token/thread reports without GitHub API reads:
 
 ```console
 wlat backfill \
-  --since 30d \
+  --last-days 30 \
+  --accounting-mode full-history-delta \
   --codex-home ~/.codex \
   --output-root ~/.codex/docs/codex-github-outcomes \
   --repo-root ~/projects \
@@ -151,7 +158,8 @@ Use this when you want to collect TSV facts first and build reports later:
 
 ```console
 wlat backfill \
-  --since 30d \
+  --last-days 30 \
+  --accounting-mode full-history-delta \
   --output-root ~/.codex/docs/codex-github-outcomes \
   --repo-root ~/projects \
   --repo-root ~/IGNORE-THIS \
@@ -194,8 +202,24 @@ data/token_turn_estimates.tsv
 data/token_session_rollups.tsv
 data/token_thread_rollups.tsv
 data/token_accounting_reconciliation.tsv
+data/window_boundary_diagnostics.tsv
+data/accounting_validation_summary.tsv
+data/README_accounting.md
+data/token_attribution_diagnostics.tsv
+data/unattributed_threads.tsv
+data/unattributed_sessions.tsv
+data/repo_attribution_evidence.tsv
 data/codex_threads.tsv
 data/github_events.tsv
+reports/economic_readiness.tsv
+reports/economic_readiness.md
+reports/economic_token_usage_by_day.tsv
+reports/economic_token_usage_by_week.tsv
+reports/economic_token_usage_by_month.tsv
+reports/economic_token_usage_by_repo.tsv
+reports/economic_token_usage_by_workstream.tsv
+reports/economic_token_usage_by_outcome.tsv
+reports/economic_token_usage_by_repo_workstream_outcome.tsv
 reports/latest_<window>_summary.md
 reports/latest_<window>_thread_rollups.tsv
 reports/latest_<window>_repo_workstream_outcome_rollups.tsv
@@ -214,6 +238,27 @@ runs/<run_id>_execution_ledger.md
 The raw event-grain TSV is the source evidence table. `data/codex_token_events.tsv` is a backward-compatible alias/copy of that raw event data. Thread, repo, workstream, outcome, day, week, and month reports aggregate upward from derived accounting views and direct raw-row diagnostics.
 
 See `examples/` for TSV entitlement data and explicit backfill/validate command examples.
+
+## Economic Token And Cost Scenarios
+
+Economic tables are token-first. WLAT does not perform ROI or business interpretation.
+
+Use `--price-config` only when you have explicit pricing evidence:
+
+```console
+wlat backfill \
+  --last-days 28 \
+  --accounting-mode full-history-delta \
+  --economic-inputs \
+  --economic-readiness \
+  --price-config ~/.codex/docs/codex-github-outcomes/config/token_prices.yml \
+  --codex-home ~/.codex \
+  --output-root ~/.codex/docs/codex-github-outcomes \
+  --repo-root ~/projects \
+  --repo-root ~/IGNORE-THIS
+```
+
+The included example config models purchased credits at `$0.04/credit` and Codex rate-card credits per 1M input, cached input, and output tokens. ChatGPT Pro subscription cost can be represented as an internal period allocation scenario, but the local Codex dashboard does not expose an official included token/credit allocation. WLAT labels that distinction in the reports.
 
 ## Token Value And Entitlements
 
@@ -250,7 +295,7 @@ When entitlement rows are present, the burnup plot can overlay base subscription
 
 ## Attribution Guidelines For Future Work
 
-Codex captures the working directory associated with sessions. That directory is one of the strongest local signals for associating token use with a repository or workstream. Better working-directory hygiene produces better reports.
+Codex captures the working directory associated with sessions. That captured `cwd` is the thread/session starting `$PWD`. WLAT resolves a git repo root from it with `git rev-parse --show-toplevel`; if no git repo exists, the captured `cwd` remains the workspace/project key. Better working-directory hygiene produces better reports.
 
 Recommended practice:
 

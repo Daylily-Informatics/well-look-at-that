@@ -36,6 +36,8 @@ def backfill_run(
     repo_roots: list[Path] | None = None,
     no_reports: bool = False,
     no_plots: bool = False,
+    accounting_mode: str = "full-history-delta",
+    price_config: Path | None = None,
 ) -> dict[str, Any]:
     output_root = output_root.expanduser()
     ensure_output_dirs(output_root)
@@ -43,10 +45,12 @@ def backfill_run(
     since = parse_window(since_spec)
     label = window_label(since_spec)
     counts: dict[str, Any] = {"run_id": run_id, "since": since_spec}
+    if accounting_mode != "full-history-delta":
+        raise ValueError(f"Unsupported accounting mode: {accounting_mode}")
     codex = collect_codex(
         codex_home=codex_home,
         output_root=output_root,
-        since=since,
+        since=None,
         run_id=run_id,
         repo_roots=repo_roots,
     )
@@ -57,7 +61,15 @@ def backfill_run(
     else:
         counts.update(collect_github(output_root=output_root, since=since, run_id=run_id, max_repos=max_repos))
     if not no_reports:
-        counts.update(generate_reports(output_root=output_root, since=since, window_label=label, run_id=run_id))
+        counts.update(
+            generate_reports(
+                output_root=output_root,
+                since=since,
+                window_label=label,
+                run_id=run_id,
+                price_config=price_config,
+            )
+        )
     if not no_plots:
         counts.update(generate_plots(output_root=output_root, since=since, window_label=label, run_id=run_id))
     validation = validate_outputs(output_root=output_root, run_id=run_id)
@@ -84,14 +96,14 @@ def backfill_run(
     return {"run_id": run_id, "status": status, "counts": counts, "validation": validation, "ledger_path": str(ledger_path)}
 
 
-def report_run(*, output_root: Path, window: str) -> dict[str, Any]:
+def report_run(*, output_root: Path, window: str, price_config: Path | None = None) -> dict[str, Any]:
     output_root = output_root.expanduser()
     ensure_output_dirs(output_root)
     run_id = run_id_now()
     since = parse_window(window)
     label = window_label(window)
     write_accounting_outputs(output_root=output_root, run_id=run_id)
-    counts = generate_reports(output_root=output_root, since=since, window_label=label, run_id=run_id)
+    counts = generate_reports(output_root=output_root, since=since, window_label=label, run_id=run_id, price_config=price_config)
     validation = validate_outputs(output_root=output_root, run_id=run_id)
     return {"run_id": run_id, "status": validation["status"], "counts": counts, "validation": validation}
 
