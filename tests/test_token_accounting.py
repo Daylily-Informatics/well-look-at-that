@@ -5,7 +5,7 @@ from pathlib import Path
 
 from tests.test_codex_collect import THREAD_ID, _write_jsonl
 
-from well_look_at_that.accounting import build_accounting
+from well_look_at_that.accounting import build_accounting, period_accounting_snapshot
 from well_look_at_that.collectors.codex import collect_codex
 from well_look_at_that.model import parse_window
 from well_look_at_that.tsv import read_tsv
@@ -24,6 +24,7 @@ def _row(
     active: int = 1,
     archived: int = 0,
     payload_hash: str | None = None,
+    is_start: int = 0,
 ) -> dict[str, str]:
     payload_hash = payload_hash or f"payload-{event_id}"
     return {
@@ -57,6 +58,8 @@ def _row(
         "workstream_label": "example",
         "outcome_type": "feature",
         "attribution_confidence": "strong",
+        "is_session_segment_start": str(is_start),
+        "model": "GPT-5.3-Codex",
     }
 
 
@@ -239,6 +242,71 @@ def test_time_reconciliation_populates_event_counts_and_deltas() -> None:
         grain_rows = [row for row in accounting["reconciliation"] if row["grain"] == grain]
         assert sum(row["token_event_count"] for row in grain_rows) == event_count
         assert sum(row["cumulative_delta_tokens"] for row in grain_rows) == delta_total
+
+
+def test_period_snapshot_uses_pre_window_baseline_for_first_delta() -> None:
+    rows = [
+        {
+            **_row(event_id="before", line=1, total=1000, cumulative=1000, is_start=1),
+            "timestamp": "2025-12-31T23:59:00Z",
+        },
+        {
+            **_row(event_id="inside-1", line=2, total=100, cumulative=1100),
+            "timestamp": "2026-01-01T00:01:00Z",
+        },
+        {
+            **_row(event_id="inside-2", line=3, total=200, cumulative=1300),
+            "timestamp": "2026-01-01T00:02:00Z",
+        },
+    ]
+    full = build_accounting(rows)
+    period = period_accounting_snapshot(rows, full, since=parse_window("2026-01-01T00:00:00Z"))
+
+    assert len(period["event_accounting"]) == 2
+    assert sum(row["cumulative_delta_tokens"] for row in period["event_accounting"]) == 300
+    assert period["event_accounting"][0]["cumulative_delta_tokens"] == 100
+    assert period["window_boundary_diagnostics"][0]["boundary_status"] == "exact_prior_baseline"
+    assert period["window_boundary_diagnostics"][0]["period_boundary_uncertain_tokens"] == 0
+
+
+def test_period_snapshot_marks_missing_pre_window_baseline_uncertain() -> None:
+    rows = [
+        {
+            **_row(event_id="inside-only", line=50, total=100, cumulative=1300, is_start=0),
+            "timestamp": "2026-01-01T00:01:00Z",
+        },
+        {
+            **_row(event_id="inside-2", line=51, total=200, cumulative=1500, is_start=0),
+            "timestamp": "2026-01-01T00:02:00Z",
+        },
+    ]
+    full = build_accounting(rows)
+    period = period_accounting_snapshot(rows, full, since=parse_window("2026-01-01T00:00:00Z"))
+    diag = period["window_boundary_diagnostics"][0]
+    thread = period["thread_rollups"][0]
+
+    assert sum(row["cumulative_delta_tokens"] for row in period["event_accounting"]) == 1500
+    assert diag["boundary_status"] == "missing_prior_baseline"
+    assert diag["period_boundary_uncertain_tokens"] == 1300
+    assert diag["period_delta_low_tokens"] == 200
+    assert thread["period_boundary_uncertain_tokens"] == 1300
+    assert thread["period_delta_low_tokens"] == 200
+
+
+def test_period_snapshot_session_start_inside_window_is_not_uncertain() -> None:
+    rows = [
+        {
+            **_row(event_id="inside-start", line=50, total=100, cumulative=1300, is_start=1),
+            "timestamp": "2026-01-01T00:01:00Z",
+        }
+    ]
+    full = build_accounting(rows)
+    period = period_accounting_snapshot(rows, full, since=parse_window("2026-01-01T00:00:00Z"))
+    diag = period["window_boundary_diagnostics"][0]
+
+    assert diag["boundary_status"] == "segment_start"
+    assert diag["period_boundary_uncertain_tokens"] == 0
+    assert period["thread_rollups"][0]["period_cumulative_delta_tokens"] == 1300
 
 
 def test_collector_writes_raw_event_metadata_and_compatibility_tsv(tmp_path: Path) -> None:

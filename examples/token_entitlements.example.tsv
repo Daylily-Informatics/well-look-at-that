@@ -1,2 +1,2 @@
 window_start	window_end	base_subscription_usd	base_subscription_tokens	purchased_usd	purchased_tokens	source	confidence	evidence_path
-2026-06-01T00:00:00Z	2026-07-01T00:00:00Z	200.00	100000000	50.00	25000000	manual example	manual	/Users/jmajor/Downloads/wlat-v2.1/config/token_entitlements.tsv
+2026-06-01T00:00:00Z	2026-07-01T00:00:00Z	200.00	100000000	50.00	25000000	manual example	manual	/Users/jmajor/Downloads/wlat-v2.2/config/token_entitlements.tsv

@@ -47,6 +47,11 @@ def backfill(
         typer.Option("--output-root", help="Report output root."),
     ] = DEFAULT_OUTPUT_ROOT,
     since: Annotated[str, typer.Option("--since", help="Window start such as 30d or 2026-01-01T00:00:00Z.")] = "30d",
+    last_days: Annotated[int | None, typer.Option("--last-days", help="Report window length in days. Overrides --since.")] = None,
+    accounting_mode: Annotated[str, typer.Option("--accounting-mode", help="Accounting mode. Supported: full-history-delta.")] = "full-history-delta",
+    economic_inputs: Annotated[bool, typer.Option("--economic-inputs", help="Generate economic token input tables.")] = False,
+    economic_readiness: Annotated[bool, typer.Option("--economic-readiness", help="Generate economic readiness tables.")] = False,
+    price_config: Annotated[Path | None, typer.Option("--price-config", help="Explicit token price scenario YAML.")] = None,
     skip_github: Annotated[bool, typer.Option("--skip-github", help="Do not call gh for GitHub activity.")] = False,
     max_repos: Annotated[int, typer.Option("--max-repos", help="Maximum GitHub repos to query.")] = 120,
     repo_roots: Annotated[
@@ -57,16 +62,19 @@ def backfill(
     no_plots: Annotated[bool, typer.Option("--no-plots", help="Skip plot generation.")] = False,
 ) -> None:
     """Collect Codex token events and optional GitHub activity."""
+    since_spec = f"{last_days}d" if last_days is not None else since
     _emit(
         backfill_run(
             codex_home=codex_home,
             output_root=output_root,
-            since_spec=since,
+            since_spec=since_spec,
             skip_github=skip_github,
             max_repos=max_repos,
             repo_roots=repo_roots,
             no_reports=no_reports,
             no_plots=no_plots,
+            accounting_mode=accounting_mode,
+            price_config=price_config,
         )
     )
 
@@ -78,6 +86,7 @@ def run_incremental(
     skip_github: Annotated[bool, typer.Option("--skip-github")] = False,
     max_repos: Annotated[int, typer.Option("--max-repos")] = 120,
     repo_roots: Annotated[list[Path] | None, typer.Option("--repo-root")] = None,
+    price_config: Annotated[Path | None, typer.Option("--price-config")] = None,
 ) -> None:
     """Run the rolling collection path for scheduled ongoing use."""
     _emit(
@@ -88,6 +97,7 @@ def run_incremental(
             skip_github=skip_github,
             max_repos=max_repos,
             repo_roots=repo_roots,
+            price_config=price_config,
         )
     )
 
@@ -95,9 +105,10 @@ def run_incremental(
 def report(
     output_root: Annotated[Path, typer.Option("--output-root")] = DEFAULT_OUTPUT_ROOT,
     window: Annotated[str, typer.Option("--window")] = "30d",
+    price_config: Annotated[Path | None, typer.Option("--price-config")] = None,
 ) -> None:
     """Regenerate TSV and Markdown reports from existing TSV data."""
-    _emit(report_run(output_root=output_root, window=window))
+    _emit(report_run(output_root=output_root, window=window, price_config=price_config))
 
 
 def plot(

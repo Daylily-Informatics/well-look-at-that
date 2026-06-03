@@ -1,0 +1,30 @@
+currency: USD
+purchased_usd_per_credit: 0.04
+subscription:
+  plan_name: ChatGPT Pro
+  monthly_usd: 200.00
+  included_usage_basis: unknown_from_local_data
+  allocation_method: internal_subscription_period_cost
+models:
+  GPT-5.5:
+    input_credits_per_1m: 125
+    cached_input_credits_per_1m: 12.50
+    output_credits_per_1m: 750
+  GPT-5.4:
+    input_credits_per_1m: 62.50
+    cached_input_credits_per_1m: 6.250
+    output_credits_per_1m: 375
+  GPT-5.4-Mini:
+    input_credits_per_1m: 18.75
+    cached_input_credits_per_1m: 1.875
+    output_credits_per_1m: 113
+  GPT-5.3-Codex:
+    input_credits_per_1m: 43.75
+    cached_input_credits_per_1m: 4.375
+    output_credits_per_1m: 350
+  GPT-5.2:
+    input_credits_per_1m: 43.75
+    cached_input_credits_per_1m: 4.375
+    output_credits_per_1m: 350
+  GPT-5.3-Codex-Spark:
+    research_preview: true
